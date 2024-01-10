@@ -137,3 +137,43 @@ string_new(usize_t cap) {
         .cap = cap,
     };
 }
+
+#define WITH_CTX(ctx, stmt) \
+{\
+    Context temp = _ctx;\
+    _ctx = (ctx);\
+    stmt;\
+    _ctx = temp;\
+}
+
+
+void back_exeption_handler(Err e) <- (Err proc())
+
+Err
+proc() {
+    if (err) {
+        return front_exeption_handler(err);
+    }
+}
+
+#define CHECK(expr) \
+{\
+    Err e = expr;\
+    if (e) {\
+        return ctx.raise(e);\
+    }\
+} 
+
+typedef Error(*ExceptionHandler)(Error e);
+
+#define ASSERT(expr) \
+    if (!(expr)) {\
+        print_stack_trace();\
+        panic();\
+    }
+
+void
+panic() {
+    exit(1);
+}
+

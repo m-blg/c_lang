@@ -6,6 +6,8 @@ from ..lib.c_lexer import *
 def test_parse_identifier():
     ld = LexerData(1, 1)
     
+    assert parse_identifier("", ld) is None
+    
     tok, _, _ = parse_identifier("id", ld)
     assert tok.text == "id"
 
@@ -13,9 +15,13 @@ def test_parse_identifier():
     assert tok.text == "_id09"
     assert rest == " rest"
     assert rest_ld == LexerData(1, len(tok.text)+1)
+    
+    assert ld == LexerData(1, 1)
 
 def test_parse_keyword():
     ld = LexerData(1, 1)
+    
+    assert parse_keyword("", ld) is None
     
     tok, _, _ = parse_keyword("if", ld)
     assert tok.text == "if"
@@ -26,6 +32,8 @@ def test_parse_keyword():
     assert tok.text == "auto"
     assert rest == "(rest"
     assert rest_ld == LexerData(1, len(tok.text)+1)
+                     
+    assert ld == LexerData(1, 1)
 
 # def test_skip_whitespace():
 #     lex.parse_whitespace("   ", )
