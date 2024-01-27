@@ -186,7 +186,18 @@ class IntegerLiteral:
 
     @staticmethod
     def parse(state: LexerState) -> LexerRet[Self]:
-        raise NotImplementedError
+        base, rest = yield combinator.choice(
+            [
+                combinator.map(parse_string("0x"), lambda _: IntegerConstantBase.HEX),
+                combinator.map(parse_string("0"), lambda _: IntegerConstantBase.OCT),
+                combinator.map(parse_string(""), lambda _: IntegerConstantBase.DEC),
+            ]
+        )(state)
+        value, rest = yield combinator.map(parse_re("[1-9][0-9]*"), lambda s: int(s))(
+            rest
+        )
+        _, rest = yield parse_string("'")(rest)
+        return infer_span(CharacterLiteral(value), state, rest)
 
     def unparse(self) -> str:
         return self.base.value + str(self.value) + self.type.value
