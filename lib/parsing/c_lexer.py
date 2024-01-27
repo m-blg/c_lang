@@ -292,26 +292,63 @@ type Token = Literal | Ident | Keyword
 
 
 def parse_token(state: LexerState) -> LexerRet[Token]:
-    return combinator.dispatch(1, [
-        (lambda l: str.isidentifier(l[0]), combinator.map(Ident.parse, lambda ident: Keyword(
-            ident, ident.span) if ident.name in KEYWORDS else ident)),
-        (lambda l: l[0] == '"', combinator.map(StringLiteral.parse, lambda lit: Literal(lit, lit.span))),
-        (lambda l: l[0] == "'", combinator.map(CharacterLiteral.parse, lambda lit: Literal(lit, lit.span))),
-        (lambda l: str.isdigit(l[0]), combinator.map(combinator.choice([IntegerLiteral.parse, FloatingLiteral.parse]), lambda lit: Literal(lit, lit.span))),
-        (lambda _: True, Punct.parse),
-    ])(state)
+    def dispatch(c: str):
+        match c:
+            # case " ":
+            #     return parse_whitespace
+            case "/":
+                return combinator.choice(
+                    [
+                        combinator.map(
+                            combinator.choice(
+                                [LineComment.parse, MultilineComment.parse]
+                            ),
+                            lambda comm: Comment(comm, comm.span),
+                        ),
+                        Punct.parse(),
+                    ]
+                )
+            case c if str.isidentifier(c):
+                return keyword_or_ident
+            case '"':
+                return combinator.map(
+                    StringLiteral.parse, lambda lit: Literal(lit, lit.span)
+                )
+            case "'":
+                return combinator.map(
+                    CharacterLiteral.parse, lambda lit: Literal(lit, lit.span)
+                )
+            case c if str.isdigit(c):
+                return combinator.map(
+                    combinator.choice([IntegerLiteral.parse, FloatingLiteral.parse]),
+                    lambda lit: Literal(lit, lit.span),
+                )
+            case c:
+                return Punct.parse
+
+    if len(state) <= 0:
+        return Err(LexerError(state, "<token>", "<end of input>"))
+    return dispatch(state[0])(state)
+    # while len(rest) > 0:
+    #     c, rest = state.advance(1)  # succeed, len(rest) at least 1
+    #     t, dispatch(c)(state)
 
 
 def parse_token_stream(state: LexerState) -> LexerRet[list[Token]]:
-    return combinator.first([
-        combinator.many(
-            combinator.last([
-                combinator.optional(parse_whitespace),
-                parse_token
-            ])
-        ),
-        combinator.optional(parse_whitespace),
-    ])(state)
+    return combinator.first(
+        [
+            combinator.many(
+                combinator.last([combinator.optional(parse_whitespace), parse_token])
+            ),
+            combinator.optional(parse_whitespace),
+        ]
+    )(state)
 
-def tokenize(text: str) -> list[Token]:
-    raise NotImplementedError
+
+def tokenize(text: str, file: str = "<file>") -> list[Token] | None:
+    match parse_token_stream(LexerState(text)):
+        case Ok(l):
+            return l
+        case Err(e):
+            print(e.format_error(file))
+            return None
