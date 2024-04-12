@@ -27,6 +27,7 @@ struct_def(Pos, {
 
 struct_def(Span, {
     str_t file_path;
+
     usize_t b_byte_offset;
     usize_t b_line;
     usize_t b_col;
@@ -48,7 +49,7 @@ struct_def(Token, {
     Span span;
 })
 
-
+/// lexing functions assumes, that in passed lexer state the prev state is equal to the current
 struct_def(LexerState, {
     str_t text;
     str_t rest; // ptr in text plus rest len
@@ -58,13 +59,14 @@ struct_def(LexerState, {
     usize_t col; 
 
     // Cache
-    // rune_t current_rune;
     struct {
         str_t rest;
         
         usize_t line;
         usize_t col; 
     } prev;
+
+    str_t file_path;
 
     // Settings
     void (*utf8_error_handler)(UTF8_Error);
@@ -113,17 +115,25 @@ lexer_utf8_error_handler(UTF8_Error e, str_t msg) {
 // }
 
 UTF8_Error
-lexer_next_rune(LexerState *state, rune_t *out_rune) {
+lexer_advance_rune(LexerState *state, rune_t *out_rune) {
     // ASSERT(str_len(state->rest) > 0);
     rune_t r;
     auto e = str_next_rune(lexer_rest(state), &r, &lexer_rest(state));
     if (e != UTF8_ERROR(OK)) {
         char buff[64];
-        usize_t len = snprintf("at %d:%d", state.line, state.col);
+        usize_t len = snprintf(buff, sizeof(buff), "at %d:%d", state.line, state.col);
         state.utf8_error_handler(e, str_from_ptr_len(buff, len));
         return e;
     }
     *out_rune = r;
+
+    if (r == "\n") {
+        state->line += 1;
+        state->col = 1;
+    } else {
+        state->col += 1;
+    }
+
     return UTF8_ERROR(OK);
 }
 
@@ -171,16 +181,22 @@ lex_string(LexerState *state, str_t lex_str, str_t *out_str) {
     return LEXING_ERROR(OK);
 }
 
-#define LEXING_NONE(state) {
-    lexer_rollback(state);
-    return LEXING_ERROR(NONE);
-}
+// won't work with nested lexing calls
+// need a cache per procedure
+#define LEXING_NONE(state) {           \
+    lexer_rollback(state);             \
+    return LEXING_ERROR(NONE);         \
+}                                      \
 
-#define LEXING_OK(state) {
-    lexer_commit(state);
-    return LEXING_ERROR(OK);
-}
+#define LEXING_OK(state) {              \
+    lexer_commit(state);                \
+    return LEXING_ERROR(OK);            \
+}                                       \
 
+/// @brief lexes string literal token
+/// @param[in, out] state 
+/// @param[out] out_token 
+/// @return 
 LexingError
 lex_string_literal(LexerState *state, Token *out_token) {
     rune_t r = 0;
@@ -188,9 +204,10 @@ lex_string_literal(LexerState *state, Token *out_token) {
     if (r != '"') {
         LEXING_NONE(state);
     }
+    str_t content = str_from_ptr_len(lexer_rest(state).ptr, 0);
 
-    lexer_advance_rune(state, &r);
     while (true) {
+        lexer_advance_rune(state, &r);
         switch (r)
         {
         case EOF:
@@ -200,22 +217,21 @@ lex_string_literal(LexerState *state, Token *out_token) {
             lex_escape_sequence(state, r)
             break;
         case '"':
+            content = str_from_ptr_len(state.prev.rest.ptr + 1, )
             goto end;
             break;
         
         default:
             break;
         }
-
-        lexer_advance_rune(state);
     }
 end:
 
     *out_token = (Token) {
         .kind = TOKEN_KIND_STRING,
-        .content = content,
+        .content.str = content,
 
-        .span = ,
+        .span = span_from_lexer(state),
     }
 
     LEXING_OK(state);
