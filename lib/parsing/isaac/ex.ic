@@ -1,0 +1,150 @@
+
+
+string_join :: fn(list: str[]) -> str?  {
+    byte_len, rune_len := list.map(|x| (x.byte_len, x.rune_len)).sum()
+    ptr: byte[] = _ctx.mem.string_alloc(byte_len)?
+    return str{ptr, len}
+}
+
+ArrayTrait :: trait<T> {
+    access :: fn(*self, index: isize) -> T
+    len :: fn(*self) -> usize
+}
+
+str_utf8 :: struct {
+    #using
+    ptr: byte[]
+    rune_len: usize
+}
+
+impl ArrayTrait<> for str {
+    access :: fn(index: isize) -> T {
+
+    }
+    len :: fn() -> usize
+}
+
+String_utf8 :: struct {
+    #using
+    buff: byte[]
+    byte_len: usize
+    rune_len: usize
+}
+
+test_string_join :: fn() {
+    a: rune[] = "hello"
+    b: str = " there"
+    str::from(a)
+    a.to_str()
+    cast str, a
+    cast a
+    c := string_join(cast<str>(a), b)
+}
+
+
+foo :: fn() {
+    x := 3
+    bar := [x]() {
+        expr(x);
+        expr;
+    }
+}
+
+
+fn [capture] (explicit args) return args {
+    body
+} 
+
+/// all arguments by default are non-alias 
+/// input arguments by default are immutable
+/// output arguments by default are mutable
+foo :: fn(x: i32,  b: i32) -> out: *vec2<i32> [vec2] {
+    out = vec2{x, .y = b}
+}
+
+bar :: fn() {
+    a, b = 3, 4
+    c = foo(a, b)
+}
+// expands to
+
+bar :: fn() {
+    a, b = 3, 4
+    c = 'foo (a, b) {
+        break 'foo vec2{x, .y = b}
+    }
+}
+
+/// pointer formalism
+
+#bake (value_type, allocator)
+fat_ptr :: struct (T: type) {
+    value_type: type = T
+    allocator: mem.Alocator
+    ptr: *T
+}
+
+impl handle {
+    len :: fn(*self) -> usize {
+        mem.size_of(self.value_type)
+    }
+}
+
+buffer :: struct (T) {
+    #using ptr: fat_ptr
+    byte_len: usize
+}
+
+
+
+/// expression
+
+/// with type inference when possible (partial type inference)
+expr [a, b, c: i32]{
+    a,b,c;
+    c: i32 = 3;
+}
+
+/// lambda notation
+/// do not bind anything to the outside world approach
+\ a, b, c: i32, 3: lit, i32: type { 
+    a,b,c;
+    c: i32 = 3;
+}
+
+/// translate it to 'C'
+
+/// auto test gen
+
+#protocol {
+    /// describe non computable or inefficiently computable invariants 
+    /// as a doc string
+
+    a_lt_b :: fn(a, b) {
+        a < b
+    }
+    a_lt_b :: a < b
+    a_lt_b :: { a < b }
+}
+foo :: fn(a: i32, b: i32) {
+    for x in a..<b {
+        ...
+    }
+}
+
+
+#translation
+#from
+
+<name:Id> :: fn(<args:ArgsList>) -> <ret1:Type> (, <rets:TypeList>)? {
+    <body>
+}
+
+#to
+
+// tr - translate
+#tr_type(<ret1>) <name>(#tr(<args>), #gen_args_from_ret_type_list(<rets>)) {
+    tr(<body>)
+}
+
+// by now 'tr' can be in any system lang or in python
