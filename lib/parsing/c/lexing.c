@@ -21,7 +21,6 @@ enum_def(TokenKind,
     TOKEN_KIND_NUMBER,
     TOKEN_KIND_PUNCT,
     TOKEN_KIND_COMMENT,
-    TOKEN_KIND_MULTILINE_COMMENT,
     TOKEN_KIND_EOF,
 )
 
@@ -47,11 +46,17 @@ struct_def(Span, {
 struct_def(Token, {
     TokenKind kind;
     union {
-        str_t str;
-        rune_t rune;
+        C_KeywordKind keyword_kind; // keyword
+        str_t name; // ident
+        str_t str; // string literal
+        rune_t rune; // char literal
         usize_t uval;
         isize_t ival;
-        C_PunctKind punct_kind;
+        C_PunctKind punct_kind; // punct
+        struct {
+            str_t text; // ident
+            bool is_multiline;
+        } comment;
     } content;
 
     Span span;
@@ -246,7 +251,9 @@ lexer_utf8_error_handler(UTF8_Error e, Pos pos, str_t note, void *data) {
 
 rune_t
 lexer_advance_rune(LexerState *state) {
-    // ASSERT(str_len(state->rest) > 0);
+    if (str_len(state->rest) == 0) {
+        return '\0';
+    }
     rune_t r;
     auto e = str_next_rune(lexer_rest(state), &r, &lexer_rest(state));
     if (e != UTF8_ERROR(OK)) {
@@ -269,7 +276,9 @@ lexer_advance_rune(LexerState *state) {
 
 rune_t
 lexer_peek_rune(LexerState *state) {
-    // ASSERT(str_len(state->rest) > 0);
+    if (str_len(state->rest) == 0) {
+        return '\0';
+    }
     rune_t r;
     str_t s;
     auto e = str_next_rune(lexer_rest(state), &r, &s);
@@ -316,7 +325,7 @@ ascii_char_set_is_in(uchar_t c, ASCII_CharSet set) {
 
 #define ASCII_SET_IDENT_NON_DIGIT ((ASCII_CharSet) {\
     .bits[4] = 0b1111'1111'1111'1110,\
-    .bits[5] = 0b1000'0111'1111'1111,\
+    .bits[5] = 0b0000'0111'1111'1111,\
     .bits[6] = 0b1111'1111'1111'1110,\
     .bits[7] = 0b0000'0111'1111'1111,\
 })\
@@ -324,9 +333,18 @@ ascii_char_set_is_in(uchar_t c, ASCII_CharSet set) {
 #define ASCII_SET_IDENT ((ASCII_CharSet) {\
     .bits[3] = 0b0000'0011'1111'1111,\
     .bits[4] = 0b1111'1111'1111'1110,\
-    .bits[5] = 0b1000'0111'1111'1111,\
+    .bits[5] = 0b0000'0111'1111'1111,\
     .bits[6] = 0b1111'1111'1111'1110,\
     .bits[7] = 0b0000'0111'1111'1111,\
+})\
+
+#define ASCII_SET_PUNCT ((ASCII_CharSet) {\
+    .bits[2] = 0b0000'0000'0000'0001,\
+    .bits[3] = 0b1111'1100'0000'0000,\
+    .bits[4] = 0b0000'0000'0000'0001,\
+    .bits[5] = 0b1111'1000'0000'0000,\
+    .bits[6] = 0b0000'0000'0000'0001,\
+    .bits[7] = 0b0111'1000'0000'0000,\
 })\
 
 /// @param[in, out] state
@@ -462,6 +480,14 @@ rune_is_ascii_ident_non_digit(rune_t r) {
     }
     return ascii_char_set_is_in((uchar_t)r, ASCII_SET_IDENT_NON_DIGIT);
 }
+INLINE
+bool
+rune_is_ascii_punct(rune_t r) {
+    if (r > 256) {
+        return false;
+    }
+    return ascii_char_set_is_in((uchar_t)r, ASCII_SET_PUNCT);
+}
 
 LexingError
 lex_comment(LexerState *state, Token *out_token) {
@@ -487,7 +513,8 @@ lex_comment(LexerState *state, Token *out_token) {
         .kind = TOKEN_KIND_COMMENT,
         .span = span_from_lexer_savepoint(state, &prev),
     };
-    out_token->content.str = content;
+    out_token->content.comment.text = content;
+    out_token->content.comment.is_multiline = false;
     LEXING_OK(state);
 }
 LexingError
@@ -522,10 +549,11 @@ lex_multiline_comment(LexerState *state, Token *out_token) {
     };
 
     *out_token = (Token) {
-        .kind = TOKEN_KIND_MULTILINE_COMMENT,
+        .kind = TOKEN_KIND_COMMENT,
         .span = span_from_lexer_savepoint(state, &prev),
     };
-    out_token->content.str = content;
+    out_token->content.comment.text = content;
+    out_token->content.comment.is_multiline = true;
     LEXING_OK(state);
 }
 
@@ -548,7 +576,17 @@ lex_punct(LexerState *state, Token *out_token) {
     }
     if (i == slice_len(&g_c_punct_vals)) {
         LEXING_NONE(state, &prev);
-    }
+    } 
+    else if (i == C_PUNCT_ETC || i == C_PUNCT_DOT) {
+        if (lexer_peek_rune(state) == '.') {
+            lexer_error(state, S("Unknown punctuator"));
+            LEXING_NONE(state, &prev);
+        }
+    } 
+    // else if (rune_is_ascii_punct(lexer_peek_rune(state))) {
+    //     lexer_error(state, S("Unknown punctuator"));
+    //     LEXING_NONE(state, &prev);
+    // }
 
     *out_token = (Token) {
         .kind = TOKEN_KIND_PUNCT,
@@ -576,11 +614,25 @@ lex_ident_or_keyword(LexerState *state, Token *out_token) {
         // lexer_advance_rune(state);
     }
     
-    *out_token = (Token) {
-        .kind = TOKEN_KIND_IDENT,
-        .span = span_from_lexer_savepoint(state, &prev),
-    };
-    out_token->content.str = content;
+    usize_t i = 0;
+    for (; i < slice_len(&g_c_keyword_vals); i += 1) {
+        if (str_eq(content, *slice_get_T(str_t, &g_c_keyword_vals, i))) {
+            break;
+        }
+    }
+    
+    if (i == slice_len(&g_c_keyword_vals)) {
+        *out_token = (Token) {
+            .kind = TOKEN_KIND_IDENT,
+        };
+        out_token->content.name = content;
+    } else {
+        *out_token = (Token) {
+            .kind = TOKEN_KIND_KEYWORD,
+        };
+        out_token->content.keyword_kind = i;
+    }
+    out_token->span = span_from_lexer_savepoint(state, &prev);
     return LEXING_ERROR(OK);
 }
 
@@ -672,19 +724,16 @@ out:
     return LEXING_ERROR(OK);
 }
 
+
+FmtError
+token_kind_dbg_fmt(TokenKind *kind, StringFormatter *fmt) {
 #define enum_item_case_fmt_write(item)\
     case item:\
         TRY(string_formatter_write(fmt, S(#item)));\
         break;\
 
-FmtError
-token_kind_dbg_fmt(TokenKind *kind, StringFormatter *fmt) {
     switch (*kind)
     {
-    // case TOKEN_KIND_STRING:
-    //     TRY(string_formatter_write(fmt, S("TOKEN_KIND_STRING")));
-    //     break;
-
     enum_item_case_fmt_write(TOKEN_KIND_INVALID)
     enum_item_case_fmt_write(TOKEN_KIND_IDENT)
     enum_item_case_fmt_write(TOKEN_KIND_KEYWORD)
@@ -693,7 +742,6 @@ token_kind_dbg_fmt(TokenKind *kind, StringFormatter *fmt) {
     enum_item_case_fmt_write(TOKEN_KIND_NUMBER)
     enum_item_case_fmt_write(TOKEN_KIND_PUNCT)
     enum_item_case_fmt_write(TOKEN_KIND_COMMENT)
-    enum_item_case_fmt_write(TOKEN_KIND_MULTILINE_COMMENT)
     enum_item_case_fmt_write(TOKEN_KIND_EOF)
     
     default:
@@ -701,6 +749,8 @@ token_kind_dbg_fmt(TokenKind *kind, StringFormatter *fmt) {
         break;
     }
     return FMT_ERROR(OK);
+
+#undef enum_item_case_fmt_write
 }
 // void
 // fprint_str(FILE *file, str_t *str) {
@@ -720,15 +770,57 @@ print_token_by_span(Token *token, str_t text) {
     print(str, &s);   
 }
 
+
+
+#ifdef DBG_PRINT
+FmtError
+span_dbg_fmt(Span *span, StringFormatter *fmt, void *_) {
+    TRY(string_formatter_write_fmt(fmt, S(
+        "Span:%+\n"
+            "file_path: %s\n"
+            "b_byte_offset: %lu\n"
+            "b_line: %lu\n"
+            "b_col: %lu\n"
+            "e_byte_offset: %lu\n"
+            "e_line: %lu\n"
+            "e_col: %lu%-"),
+
+        span->file_path,
+          
+        span->b_byte_offset,
+        span->b_line,
+        span->b_col,
+          
+        span->e_byte_offset,
+        span->e_line,
+        span->e_col            
+    ));
+    return FMT_ERROR(OK);
+}
+FmtError
+c_token_dbg_fmt(Token *token, StringFormatter *fmt, void *text) {
+    str_t _text = str_byte_slice(*(str_t *)text, token->span.b_byte_offset, token->span.e_byte_offset);
+    TRY(string_formatter_write_fmt(fmt, S(
+        "Token:%+\n"
+            "kind: %v,\n"
+            "span: %+%v%-,\n"
+            "text: %s%-"),
+        fmt_obj_pref(token_kind_dbg, &token->kind),
+        fmt_obj_pref(span_dbg, &token->span),
+        _text
+    ));
+    return FMT_ERROR(OK);
+}
+
+
 void
-print_tokens(darr_T(Token) tokens, str_t text) {
+dbg_print_tokens(darr_T(Token) tokens, str_t text) {
     for_in_range(i, 0, darr_len(tokens), {
-        print_token_by_span(darr_get_T(Token, tokens, i), text);
-        println(str, &S(""));
+        // print_token_by_span(darr_get_T(Token, tokens, i), text);
+        dbgp(c_token, darr_get_T(Token, tokens, i), &text);
+        // println(str, &S(""));
     })
     println(str, &S(""));
 }
 
-
-
-
+#endif // DBG_PRINT
