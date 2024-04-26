@@ -79,6 +79,35 @@ enum_def(C_KeywordKind,
     C_KEYWORD__IMAGINARY
 )
 
+// kind == C_KEYWORD_VOID ||
+// kind == C_KEYWORD_CHAR ||
+// kind == C_KEYWORD_SHORT ||
+// kind == C_KEYWORD_INT ||
+// kind == C_KEYWORD_LONG ||
+// kind == C_KEYWORD_FLOAT ||
+// kind == C_KEYWORD_DOUBLE ||
+// kind == C_KEYWORD_SIGNED ||
+// kind == C_KEYWORD_UNSIGNED ||
+// kind == C_KEYWORD__BOOL ||
+// kind == C_KEYWORD__COMPLEX ||
+// kind == C_KEYWORD__IMAGINARY
+
+#define c_keyword_str_from_kind(kind) (*slice_get_T(str_t, &g_c_keyword_vals, (kind)))
+#define c_keyword_is_type_specifier(kind) (\
+                    kind == C_KEYWORD_VOID ||\
+                    kind == C_KEYWORD_CHAR ||\
+                    kind == C_KEYWORD_SHORT ||\
+                    kind == C_KEYWORD_INT ||\
+                    kind == C_KEYWORD_LONG ||\
+                    kind == C_KEYWORD_FLOAT ||\
+                    kind == C_KEYWORD_DOUBLE ||\
+                    kind == C_KEYWORD_SIGNED ||\
+                    kind == C_KEYWORD_UNSIGNED ||\
+                    kind == C_KEYWORD__BOOL ||\
+                    kind == C_KEYWORD__COMPLEX ||\
+                    kind == C_KEYWORD__IMAGINARY)\
+
+
 slice_t g_c_punct_vals = slice_lit(
     S("<<="),
     S(">>="),
@@ -200,3 +229,5 @@ enum_def(C_PunctKind,
 
     C_PUNCT_EQUAL
 )
+
+#define c_punct_str_from_kind(kind) (*slice_get_T(str_t, &g_c_punct_vals, (kind)))
