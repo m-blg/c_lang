@@ -353,10 +353,10 @@ c_ast_record_unparse_fmt(C_Ast_TypeRecord *record, StringFormatter *fmt, void *_
     }
     TRY(string_formatter_write_fmt(fmt, S("{\n")));
     string_formatter_pad_inc(fmt);
-    for_in_range(i, 0, darr_len(record->fields), {
+    for_in_range(i, 0, darr_len(record->fields)) {
         TRY(c_ast_decl_unparse_fmt(darr_get_T(C_Ast_Decl, record->fields, i), fmt, nullptr));
         TRY(string_formatter_write_fmt(fmt, S("\n")));
-    })
+    }
     string_formatter_pad_dec(fmt);
     TRY(string_formatter_write(fmt, S("}")));
     return FMT_ERROR(OK);
@@ -756,11 +756,6 @@ c_parse_direct_declarator(ParserState *state, C_Ast_Type **decl_ty_head, C_Ast_T
     PARSING_OK();
 }
 
-#ifndef NDEBUG
-#define DBG_ASSERT(x) ASSERT(x)
-#else
-#define DBG_ASSERT(x) 
-#endif
 
 INLINE
 void

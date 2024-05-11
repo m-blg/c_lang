@@ -16,10 +16,6 @@ test1() {
         .ty_ident = (C_Ast_TypeIdent) {
             .ty_kind = C_AST_TYPE_KIND_IDENT,
             .name = S("TypeA"),
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
         },
     };
     // auto arr2_ty = (C_Ast_Type) {
@@ -35,10 +31,10 @@ test1() {
         .ty_pointer = (C_Ast_TypePointer) {
             .ty_kind = C_AST_TYPE_KIND_POINTER,
             .pointee = &ty,
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
+        },
+        .span = (C_ParserSpan) {
+            .b_tok = 0,
+            .e_tok = 1,
         },
     };
     auto count_expr = (C_Ast_Expr) {
@@ -49,9 +45,9 @@ test1() {
                 .lit_kind = C_AST_LITERAL_KIND_NUMBER,
                 .num_ty = C_NUMBER_TYPE_INT,
                 .value_int = 16,
-                .span = { 0 },
             },
         },
+        .span = { 0 },
     };
     auto arr_ty = (C_Ast_Type) {
         .kind = C_AST_NODE_KIND_TYPE_NAME,
@@ -59,10 +55,6 @@ test1() {
             .ty_kind = C_AST_TYPE_KIND_ARRAY,
             .item = &ty,
             .count = nullptr,
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
         },
     };
     auto arr_p_ty = (C_Ast_Type) {
@@ -71,10 +63,6 @@ test1() {
             .ty_kind = C_AST_TYPE_KIND_ARRAY,
             .item = &pointer_ty,
             .count = nullptr,
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
         },
     };
     auto p_arr_p_ty = (C_Ast_Type) {
@@ -82,10 +70,6 @@ test1() {
         .ty_pointer = (C_Ast_TypePointer) {
             .ty_kind = C_AST_TYPE_KIND_POINTER,
             .pointee = &arr_p_ty,
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
         },
     };
     auto pp_arr_p_ty = (C_Ast_Type) {
@@ -93,10 +77,6 @@ test1() {
         .ty_pointer = (C_Ast_TypePointer) {
             .ty_kind = C_AST_TYPE_KIND_POINTER,
             .pointee = &p_arr_p_ty,
-            .span = (C_ParserSpan) {
-                .b_token_offset = 0,
-                .e_token_offset = 1,
-            },
         },
     };
     String s;
@@ -140,9 +120,9 @@ test1() {
 
 
 // FmtError
-// span_dbg_fmt(Span *span, StringFormatter *fmt, void *_) {
+// span_dbg_fmt(C_LexerSpan *span, StringFormatter *fmt, void *_) {
 //     TRY(string_formatter_write_fmt(fmt, S(
-//         "Span:%+\n"
+//         "C_LexerSpan:%+\n"
 //             "file_path: %s\n"
 //             "b_byte_offset: %lu\n"
 //             "b_line: %lu\n"
@@ -170,27 +150,27 @@ gen_dbg_fmt_fmt(C_Ast_TypeStruct *st, StringFormatter *fmt, void *_) {
         "FmtError\n"
         "%s_dbg_fmt(%s *self, StringFormatter *fmt, void *_) {\n%+"
             "TRY(string_formatter_write_fmt(fmt, S(%+\n"
-            "\"%s:\\%+\\\\n%+\"\n"
+            "\"%s:%%+\\n%+\"\n"
             // ")))"
         ),
         st->name->name, st->name->name, st->name->name);
 
-    for_in_range(i, 0, darr_len(st->fields)-1, {
+    for_in_range(i, 0, darr_len(st->fields)-1) {
         auto field = darr_get_T(C_Ast_Decl, st->fields, i);
         str_t field_ty_fmt = S("%d");
-        string_formatter_write_fmt(fmt, S("\"%s: %s\\\\n\"\n"), field->name->name, field_ty_fmt);
-    })
+        string_formatter_write_fmt(fmt, S("\"%s: %s\\n\"\n"), field->name->name, field_ty_fmt);
+    }
     {
         auto field = darr_get_iT(C_Ast_Decl, st->fields, -1);
         str_t field_ty_fmt = S("%d");
-        string_formatter_write_fmt(fmt, S("\"%s: %s\\\\n\\%-\"\n"), field->name->name, field_ty_fmt);
+        string_formatter_write_fmt(fmt, S("\"%s: %s\\n%%-\"\n"), field->name->name, field_ty_fmt);
     }
     string_formatter_write_fmt(fmt, S("%-),\n"));
 
-    for_in_range(i, 0, darr_len(st->fields)-1, {
+    for_in_range(i, 0, darr_len(st->fields)-1) {
         auto field = darr_get_T(C_Ast_Decl, st->fields, i);
         string_formatter_write_fmt(fmt, S("self->%s,\n"), field->name->name);
-    })
+    }
     {
         auto field = darr_get_iT(C_Ast_Decl, st->fields, -1);
         string_formatter_write_fmt(fmt, S("self->%s\n"), field->name->name);
@@ -298,11 +278,186 @@ test3() {
     dbgp(StructA, &a);
 }
 
+
+// typedef struct D D;
+// register struct D {
+//     int field1, (*(*field1_2)[3])(int), *field3[5];
+//     int field2;
+// } g_a;
+
+void
+test4() {
+    // str_t text = S("\"text\" / \"more text\" \0");
+    // str_t text = S("\"text\" , ... : _ident  /** \"more text\" **/ \0");
+    str_t text = S(
+        "struct A {"
+        );
+    LexerState state;
+    lexer_init_default(&state, text, S("<file>"));
+    darr_t tokens;
+    ASSERT_OK(tokenize(&state, &tokens));
+
+    // print_tokens(tokens, text);
+    // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+    C_Token *tok = nullptr;
+    C_Ast_Ident *ident = nullptr;
+
+    ParserState pstate = (ParserState) {
+        .tokens = tokens->data,
+        .ast_alloc = g_ctx.global_alloc,
+    };
+    // parser_init_default(&pstate, tokens);
+
+    ASSERT_OK(c_parse_keyword(&pstate, C_KEYWORD_STRUCT, &tok));
+    dbgp(c_token, tok, .data = &text);
+    ASSERT_OK(c_parse_ident(&pstate, &ident));
+    c_ast_unparse_println(ident, ident, nullptr);
+    ASSERT_OK(c_parse_punct(&pstate, C_PUNCT_LEFT_BRACE, &tok));
+    dbgp(c_token, tok, .data = &text);
+
+
+    allocator_free(&g_ctx.global_alloc, (void **)&ident);
+    // str_t c = darr_get_T(Token, tokens, 0)->content.str;
+    // printlnf("%.*s", (int)str_len(c), (char *)c.ptr);
+    darr_free(&tokens);
+}
+
+void
+test6() {
+    str_t text = S(
+        "struct A {\n"
+            "int x;\n"
+            "int x2;\n"
+            "int x3;\n"
+        "};\n"
+        );
+    LexerState state;
+    lexer_init_default(&state, text, S("<file>"));
+    darr_t tokens;
+    ASSERT_OK(tokenize(&state, &tokens));
+
+    // print_tokens(tokens, text);
+    // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+    C_Token *tok = nullptr;
+    C_Ast_Decl *decl = nullptr;
+    C_Ast_Type *ty = nullptr;
+
+    auto pstate = (ParserState) {
+        .tokens = tokens->data,
+        .ast_alloc = g_ctx.global_alloc,
+    };
+    // parser_init_default(&pstate, tokens);
+
+    // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
+    // c_ast_unparse_println(type, ty, nullptr);
+
+    pstate = (ParserState) {
+            .tokens = tokens->data,
+            .ast_alloc = g_ctx.global_alloc,
+        };
+    ASSERT_OK(c_parse_declaration(&pstate, &decl));
+    c_ast_unparse_println(decl, decl, nullptr);
+
+
+
+    // allocator_free(&g_ctx.global_alloc, (void **)&ty);
+    // str_t c = darr_get_T(Token, tokens, 0)->content.str;
+    // printlnf("%.*s", (int)str_len(c), (char *)c.ptr);
+    darr_free(&tokens);
+}
+
+
+double;
+
+void
+test5() {
+    str_t text = S(
+        "struct A {\n"
+            "int x;\n"
+            "int x2;\n"
+            "int x3;\n"
+        "};\n"
+        );
+    LexerState state;
+    lexer_init_default(&state, text, S("<file>"));
+    darr_t tokens;
+    ASSERT_OK(tokenize(&state, &tokens));
+
+    // print_tokens(tokens, text);
+    // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+    C_Token *tok = nullptr;
+    C_Ast_Decl *decl = nullptr;
+    C_Ast_Type *ty = nullptr;
+
+    auto pstate = (ParserState) {
+        .tokens = tokens->data,
+        .ast_alloc = g_ctx.global_alloc,
+    };
+    // parser_init_default(&pstate, tokens);
+
+    // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
+    // c_ast_unparse_println(type, ty, nullptr);
+
+    pstate = (ParserState) {
+            .tokens = tokens->data,
+            .ast_alloc = g_ctx.global_alloc,
+        };
+    ASSERT_OK(c_parse_declaration(&pstate, &decl));
+    c_ast_unparse_println(decl, decl, nullptr);
+
+
+    println(gen_dbg_fmt, (C_Ast_TypeStruct *)decl->ty);
+
+    // allocator_free(&g_ctx.global_alloc, (void **)&ty);
+    // str_t c = darr_get_T(Token, tokens, 0)->content.str;
+    // printlnf("%.*s", (int)str_len(c), (char *)c.ptr);
+    darr_free(&tokens);
+}
+typedef struct A A;
+struct A {
+    int x;
+    int x2;
+    int x3;
+};
+FmtError
+A_dbg_fmt(A *self, StringFormatter *fmt, void *_) {
+    TRY(string_formatter_write_fmt(fmt, S(
+        "A:%+\n"
+            "x: %d\n"
+            "x2: %d\n"
+            "x3: %d\n%-"
+        ),
+        self->x,
+        self->x2,
+        self->x3
+    ));
+    return FMT_ERROR(OK);
+}
+
+void
+test7() {
+}
+
 int
 main() {
     ctx_init_default();
 
     // test1();
-    test2();
-    test3();
+    // test2();
+    // test3();
+    // int field1 = 3, (*(*field1_2)[3])(int), *field1_3[] = {0};
+    // test4();
+    test5();
+    // auto a = (A) {
+    //     .x = 3,
+    //     .x2 = 4,
+    //     .x3 = 5,
+    // };
+    // dbgp(A, &a);
 }
