@@ -1,10 +1,44 @@
+// TODO:
+//  1. lazy error messages (with potential discarding) 
+//  2. lazy init allocations (batch allocation)
+
+#include "core/string.h"
+struct_def(TU_FileData, {
+    str_t text;
+    // TODO dependencies maybe
+})
+
+
+#define TU_FileData_fmt nullptr
+#define TU_FileData_dbg_fmt nullptr
+#define TU_FileData_eq nullptr
+#define TU_FileData_set nullptr
+#define TU_FileData_hash nullptr
+
+#ifndef TYPE_LIST
+#define TYPE_LIST \
+    TYPE_LIST_ENTRY(int), \
+    TYPE_LIST_ENTRY(usize_t), \
+    TYPE_LIST_ENTRY(str_t), \
+    TYPE_LIST_ENTRY(ArenaChunk), \
+    TYPE_LIST_ENTRY(darr_t), \
+    TYPE_LIST_ENTRY(TU_FileData)
+
+#endif // TYPE_LIST
+
 #define CORE_IMPL
 #include "core/string.h"
 #include "core/io.h"
 #include "core/array.h"
 #include "core/arena.h"
+#include "core/hashmap.h"
 
 #include "parsing/c/def.h"
+
+enum_def(LogLevel,
+    LOG_LEVEL_WARN,
+    LOG_LEVEL_ERROR,
+)
 
 enum_def(LexingError, 
     LEXING_ERROR_OK,
@@ -22,8 +56,12 @@ enum_def(C_TokenKind,
     C_TOKEN_KIND_NUMBER,
     C_TOKEN_KIND_PUNCT,
     C_TOKEN_KIND_COMMENT,
+    C_TOKEN_KIND_PP_DIRECTIVE,
+    C_TOKEN_KIND_HEADER_NAME,
+    C_TOKEN_KIND_INCLUDE,
+    C_TOKEN_KIND_EXPAND,
     C_TOKEN_KIND_NEW_LINE,
-    C_TOKEN_KIND_EOF,
+    C_TOKEN_KIND_EOF
 )
 
 struct_def(Pos, {
@@ -75,25 +113,14 @@ struct_def(C_TokenInclude, {
     str_t file;
     darr_T(C_Token) tokens;
 })
-
-struct_def(C_Token, {
-    C_TokenKind kind;
-    union {
-        C_TokenIdent t_ident;
-        C_TokenKeyword t_keyword;
-        C_TokenPunct t_punct;
-        C_TokenComment t_comment;
-        C_TokenStringLiteral t_str_lit;
-        C_TokenCharLiteral t_char_lit;
-        C_TokenNumLiteral t_num_lit;
-        C_TokenInclude t_include;
-    };
-
-    C_LexerSpan span;
+/// appears in place of macro expansion
+struct_def(C_TokenExpand, {
+    str_t def_name;
+    darr_T(C_Token) tokens;
 })
 
 
-enum_def(C_PP_Directive,
+enum_def(C_PP_DirectiveKind,
     C_PP_DIRECTIVE_INVALID,
     C_PP_DIRECTIVE_INCLUDE,
     C_PP_DIRECTIVE_DEFINE,
@@ -109,6 +136,34 @@ enum_def(C_PP_Directive,
     C_PP_DIRECTIVE_ENDIF
 )
 
+struct_def(C_Token_PP_Directive, {
+    C_PP_DirectiveKind dir_kind;
+})
+
+struct_def(C_TokenHeaderName, {
+    str_t name;
+    uchar_t brackets; // '<' or '"'
+})
+
+struct_def(C_Token, {
+    C_TokenKind kind;
+    C_LexerSpan span;
+    union {
+        C_TokenIdent t_ident;
+        C_TokenKeyword t_keyword;
+        C_TokenPunct t_punct;
+        C_TokenComment t_comment;
+        C_TokenStringLiteral t_str_lit;
+        C_TokenCharLiteral t_char_lit;
+        C_TokenNumLiteral t_num_lit;
+        C_Token_PP_Directive t_pp_directive;
+        C_TokenHeaderName t_header_name;
+        C_TokenInclude t_include;
+        C_TokenExpand t_expand;
+    };
+})
+
+
 struct_def(LexerState, {
     str_t text;
     str_t rest; // ptr in text plus rest len
@@ -119,6 +174,8 @@ struct_def(LexerState, {
 
     // stored on procedures, like registers
     str_t file_path;
+    // file_path -> FileData
+    hashmap_T(str_t, TU_FileData) file_data_table;
 
     //# cache
     rune_t cache_cur_rune;
@@ -127,8 +184,9 @@ struct_def(LexerState, {
     //# preprocessing
     slice_T(str_t) include_filepaths;
     bool do_preprocessing;
-    // hash_map_T(darr_T(C_Token)) pp_defs;
+    hashmap_T(str_t, darr_T(C_Token)) pp_defs;
     // darr_T(C_PP_Directive) pp_if_stack; // conditions pp-directives
+    usize_t pp_if_depth; // conditions pp-directives
 
     //# memory
     /// by ptr cause want to share them with sublexers
@@ -143,7 +201,7 @@ struct_def(LexerState, {
     /// aborting error handler
     void (*utf8_error_handler)(UTF8_Error, Pos pos, str_t, void *);
     void (*alloc_error_handler)(LexerState *, AllocatorError, void *);
-    void (*error)(str_t, str_t, Pos);
+    void (*error)(str_t, str_t, Pos, LogLevel);
 })
 
 void
@@ -151,7 +209,7 @@ lexer_utf8_error_handler_default(UTF8_Error e, Pos pos, str_t note, void *data);
 void
 lexer_alloc_error_handler_default(LexerState *state, AllocatorError e, void *data);
 void
-lexer_error_print(str_t main_msg, str_t note, Pos pos);
+lexer_error_print(str_t main_msg, str_t note, Pos pos, LogLevel log_level);
 
 #define lexer_rest_len(state) ((state)->rest.rune_len)
 #define lexer_rest(state) ((state)->rest)
@@ -194,6 +252,7 @@ lexer_intern_batch(LexerState *state, str_t *out_str);
 // lexer_save(LexerState *state);
 
 
+/// can be you used only in places where pp stuff is not updated, e.g. when advancing runes
 struct_def(LexerSavepoint, {
     str_t rest;
     
@@ -279,6 +338,21 @@ span_from_lexer_pos(Pos *begin, Pos *end)
 }
 
 void
+lexer_init_cache(LexerState *self) {
+    if (str_len(self->text) == 0) {
+        self->cache_cur_rune = 0;
+        self->cache_rest = self->text;
+        return;
+    }
+    auto e = str_next_rune(lexer_rest(self), &self->cache_cur_rune, &self->cache_rest);
+    if (e != UTF8_ERROR(OK) && e != UTF8_ERROR(EMPTY_STRING)) {
+        self->utf8_error_handler(e, lexer_pos(self), S(""), nullptr);
+        return;
+    }
+}
+ 
+
+void
 lexer_init_default(LexerState *self, str_t text, str_t file_path) {
     *self = (LexerState) {
         .text = text,
@@ -292,11 +366,23 @@ lexer_init_default(LexerState *self, str_t text, str_t file_path) {
 
         .do_preprocessing = true,
     };
+    #undef LEXER_ALLOC_HANDLE_STATE
+    #define LEXER_ALLOC_HANDLE_STATE self
+
+    LEXER_ALLOC_HANDLE(hashmap_new_cap_in_T(str_t, TU_FileData, 64, &g_ctx.global_alloc, &self->file_data_table));
+    auto fd = (TU_FileData) {
+        .text = text,
+    };
+    LEXER_ALLOC_HANDLE(hashmap_set(&self->file_data_table, &file_path, &fd));
+
+    // init pp
+    {
+        // LEXER_ALLOC_HANDLE(darr_new_cap_in_T(C_PP_DirectiveKind, 16, &g_ctx.global_alloc, &self->pp_if_stack));
+        LEXER_ALLOC_HANDLE(hashmap_new_cap_in_T(str_t, darr_t, 64, &g_ctx.global_alloc, &self->pp_defs));
+    }
 
     // init mem
     {
-        #undef LEXER_ALLOC_HANDLE_STATE
-        #define LEXER_ALLOC_HANDLE_STATE self
         LEXER_ALLOC_HANDLE(NEW(&self->string_arena));
         LEXER_ALLOC_HANDLE(NEW(&self->token_arena));
         LEXER_ALLOC_HANDLE(NEW(&self->string_batch));
@@ -304,21 +390,22 @@ lexer_init_default(LexerState *self, str_t text, str_t file_path) {
         LEXER_ALLOC_HANDLE(arena_init(self->string_arena, str_len(text), &g_ctx.global_alloc));
         LEXER_ALLOC_HANDLE(arena_init(self->token_arena, str_len(text), &g_ctx.global_alloc));
         LEXER_ALLOC_HANDLE(string_new_cap_in(256, &g_ctx.global_alloc, self->string_batch));
-        #undef LEXER_ALLOC_HANDLE_STATE
-        #define LEXER_ALLOC_HANDLE_STATE state
     }
+    #undef LEXER_ALLOC_HANDLE_STATE
+    #define LEXER_ALLOC_HANDLE_STATE state
 
     // init cache
-    if (str_len(text) == 0) {
-        self->cache_cur_rune = 0;
-        self->cache_rest = text;
-        return;
-    }
-    auto e = str_next_rune(lexer_rest(self), &self->cache_cur_rune, &self->cache_rest);
-    if (e != UTF8_ERROR(OK) && e != UTF8_ERROR(EMPTY_STRING)) {
-        self->utf8_error_handler(e, lexer_pos(self), S(""), nullptr);
-        return;
-    }
+    lexer_init_cache(self);
+    // if (str_len(text) == 0) {
+    //     self->cache_cur_rune = 0;
+    //     self->cache_rest = text;
+    //     return;
+    // }
+    // auto e = str_next_rune(lexer_rest(self), &self->cache_cur_rune, &self->cache_rest);
+    // if (e != UTF8_ERROR(OK) && e != UTF8_ERROR(EMPTY_STRING)) {
+    //     self->utf8_error_handler(e, lexer_pos(self), S(""), nullptr);
+    //     return;
+    // }
 }
 void
 lexer_deinit(LexerState *self) {
@@ -329,20 +416,48 @@ lexer_deinit(LexerState *self) {
     FREE(&self->string_arena);
     FREE(&self->token_arena);
 
+    // darr_free(&self->pp_if_stack);
+
+    for_in_range(i, 0, self->pp_defs->count) {
+        darr_free(slice_get_T(darr_t, &self->pp_defs->values, i));
+    }
+    hashmap_free(&self->pp_defs);
+
+    hashmap_free(&self->file_data_table);
+
     *self = (LexerState) {};
 }
 
 void
 lexer_error(LexerState *state, str_t msg) {
-    lexer_error_print(msg, S(""), lexer_pos(state));
+    lexer_error_print(msg, S(""), lexer_pos(state), LOG_LEVEL_ERROR);
+}
+void
+lexer_warn(LexerState *state, str_t msg) {
+    lexer_error_print(msg, S(""), lexer_pos(state), LOG_LEVEL_WARN);
 }
 
 void
-lexer_error_print(str_t main_msg, str_t note, Pos pos) {
-    fprintf(stderr, KRED"ERROR: "KNRM"%.*s\n"KNRM"at"KYEL" %.*s:%ld:%ld\n"KNRM, 
-        (int)str_len(main_msg), (char *)main_msg.ptr, 
-        (int)str_len(pos.file_path), (char *)pos.file_path.ptr, 
-        pos.line, pos.col);
+lexer_error_print(str_t main_msg, str_t note, Pos pos, LogLevel log_level) {
+    switch (log_level)
+    {
+    case LOG_LEVEL_WARN:
+        fprintf(stderr, KMAG"WARN: "KNRM"%.*s\n"KNRM"at"KYEL" %.*s:%ld:%ld\n"KNRM, 
+            (int)str_len(main_msg), (char *)main_msg.ptr, 
+            (int)str_len(pos.file_path), (char *)pos.file_path.ptr, 
+            pos.line, pos.col);
+        break;
+    case LOG_LEVEL_ERROR:
+        fprintf(stderr, KRED"ERROR: "KNRM"%.*s\n"KNRM"at"KYEL" %.*s:%ld:%ld\n"KNRM, 
+            (int)str_len(main_msg), (char *)main_msg.ptr, 
+            (int)str_len(pos.file_path), (char *)pos.file_path.ptr, 
+            pos.line, pos.col);
+        break;
+    
+    default:
+        unreacheble();
+        break;
+    }
 
     if (str_len(note) > 0) {
         fprintf(stderr, KBLU"NOTE: "KNRM"%.*s\n",
@@ -355,12 +470,12 @@ lexer_utf8_error_handler_default(UTF8_Error e, Pos pos, str_t note, void *data) 
     switch (e) {
     case UTF8_ERROR(INVALID_RUNE): 
     case UTF8_ERROR(INCOMPLETE_RUNE): 
-        lexer_error_print(S("Invalid UTF8 character"), note, pos);
+        lexer_error_print(S("Invalid UTF8 character"), note, pos, LOG_LEVEL_ERROR);
         // fprintf(stderr, "Invalid UTF8 character\nat %.*s:%ld:%ld\n", str_len(pos.file_path), 
         //     pos.file_path.ptr, pos.line, pos.col);
         break;
     case UTF8_ERROR(EMPTY_STRING): 
-        lexer_error_print(S("Empty string"), note, pos);
+        lexer_error_print(S("Empty string"), note, pos, LOG_LEVEL_ERROR);
         // fprintf(stderr, "Empty string\nat %.*s:%ld:%ld\n", str_len(pos.file_path), 
         //     pos.file_path.ptr, pos.line, pos.col);
         break;
@@ -406,6 +521,10 @@ lexer_alloc_error_handler_default(LexerState *state, AllocatorError e, void *dat
 //     // return UTF8_ERROR(OK);
 // }
 
+INLINE
+rune_t
+lexer_peek_rune(LexerState *state);
+
 rune_t
 lexer_advance_rune_no_cache(LexerState *state) {
     if (str_len(state->rest) == 0) {
@@ -430,21 +549,20 @@ lexer_advance_rune_no_cache(LexerState *state) {
 
     return r;
 }
+
 rune_t
-lexer_advance_rune(LexerState *state) {
+lexer_advance_rune_no_escape(LexerState *state) {
+    rune_t r = state->cache_cur_rune;
     if (str_len(state->rest) == 0) {
         return '\0';
     }
-    if (state->cache_cur_rune == '\n') {
+    if (r == '\n') {
         state->line += 1;
-        state->col = 1;
-    } else {
-        state->col += 1;
-    }
+    } 
+    state->col += 1;
 
     SWAP(state->rest, state->cache_rest);
-    rune_t r = 0;
-    auto e = str_next_rune(lexer_rest(state), &r, &state->cache_rest);
+    auto e = str_next_rune(lexer_rest(state), &state->cache_cur_rune, &state->cache_rest);
     if (e != UTF8_ERROR(OK)) {
         if (e != UTF8_ERROR(EMPTY_STRING)) {
             state->utf8_error_handler(e, lexer_pos(state), S(""), nullptr);
@@ -452,9 +570,49 @@ lexer_advance_rune(LexerState *state) {
         }
 
         state->cache_rest = state->rest;
-        r = 0;
+        state->cache_cur_rune = 0;
     }
-    SWAP(r, state->cache_cur_rune);
+    // SWAP(r, state->cache_cur_rune);
+
+    return r;
+}
+rune_t
+lexer_advance_rune(LexerState *state) {
+    rune_t r = state->cache_cur_rune;
+    if (str_len(state->rest) == 0) {
+        return '\0';
+    }
+    if (r == '\n') {
+        state->line += 1;
+    }
+    state->col += 1;
+
+    SWAP(state->rest, state->cache_rest);
+    auto e = str_next_rune(lexer_rest(state), &state->cache_cur_rune, &state->cache_rest);
+    if (e != UTF8_ERROR(OK)) {
+        if (e != UTF8_ERROR(EMPTY_STRING)) {
+            state->utf8_error_handler(e, lexer_pos(state), S(""), nullptr);
+            return 0;
+        }
+
+        state->cache_rest = state->rest;
+        state->cache_cur_rune = 0;
+    }
+    // SWAP(r, state->cache_cur_rune);
+
+    do {
+        if (state->cache_cur_rune == '\\') {
+            auto prev = lexer_save(state);
+            lexer_advance_rune_no_escape(state);
+            if (lexer_peek_rune(state) != '\n') {
+                lexer_restore(state, &prev);
+            } else {
+                lexer_advance_rune_no_escape(state);
+                continue;
+            }
+        }
+        break;
+    } while(1);
 
     return r;
 }
@@ -477,6 +635,7 @@ lexer_advance_rune_no_eol(LexerState *state) {
         r = 0;
     }
     SWAP(r, state->cache_cur_rune);
+    state->col += 1;
 
     return r;
 }
@@ -541,7 +700,7 @@ ascii_char_set_is_in(uchar_t c, ASCII_CharSet set) {
 
 #define ASCII_SET_IDENT_NON_DIGIT ((ASCII_CharSet) {\
     .bits[4] = 0b1111'1111'1111'1110,\
-    .bits[5] = 0b0000'0111'1111'1111,\
+    .bits[5] = 0b1000'0111'1111'1111,\
     .bits[6] = 0b1111'1111'1111'1110,\
     .bits[7] = 0b0000'0111'1111'1111,\
 })\
@@ -549,7 +708,7 @@ ascii_char_set_is_in(uchar_t c, ASCII_CharSet set) {
 #define ASCII_SET_IDENT ((ASCII_CharSet) {\
     .bits[3] = 0b0000'0011'1111'1111,\
     .bits[4] = 0b1111'1111'1111'1110,\
-    .bits[5] = 0b0000'0111'1111'1111,\
+    .bits[5] = 0b1000'0111'1111'1111,\
     .bits[6] = 0b1111'1111'1111'1110,\
     .bits[7] = 0b0000'0111'1111'1111,\
 })\
@@ -823,7 +982,7 @@ LexingError
 lex_comment(LexerState *state, C_Token *out_token) {
     auto prev = lexer_save(state);
     str_t content;
-    if (lex_string(state, S("//"), &content) != LEXING_ERROR(OK)) {
+    if (IS_ERR(lex_string(state, S("//"), &content))) {
         lexer_error(state, S("Comment was expected here"));
     }
     while (true)
@@ -854,7 +1013,15 @@ lex_multiline_comment(LexerState *state, C_Token *out_token) {
     if (lex_string(state, S("/*"), &content) != LEXING_ERROR(OK)) {
         lexer_error(state, S("Comment was expected here"));
     }
-    while (true)
+
+    auto string_batch = state->string_batch;
+    string_reset(string_batch);
+    uchar_t *c = string_end(string_batch);
+    rune_t r = 0;
+
+    do { 
+        LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 16));
+    for_in_range(_, 0, string_batch->byte_cap)
     {
         rune_t r = lexer_peek_rune(state);
         if (r == '*') {
@@ -862,7 +1029,7 @@ lex_multiline_comment(LexerState *state, C_Token *out_token) {
             lexer_advance_rune(state);
             r = lexer_advance_rune(state);
             if (r == '/') {
-                break;
+                goto out;
             } else {
                 lexer_restore(state, &peek);
             }
@@ -871,19 +1038,26 @@ lex_multiline_comment(LexerState *state, C_Token *out_token) {
             lexer_error(state, S("Comment was not terminated"));
             LEXING_NONE(state, &prev);
         }
+        string_append_rune(string_batch, r);
         lexer_advance_rune(state);
-    }
-    content = (str_t) {
-        .ptr = prev.rest.ptr + 2,
-        .byte_len = (uintptr_t)lexer_rest(state).ptr - (uintptr_t)prev.rest.ptr - 5,
-    };
+    }} while(1);
+    out:
+
+    lexer_intern_batch(state, &content);
+
+    // content = (str_t) {
+    //     .ptr = prev.rest.ptr + 2,
+    //     .byte_len = (uintptr_t)lexer_rest(state).ptr - (uintptr_t)prev.rest.ptr - 5,
+    // };
 
     *out_token = (C_Token) {
         .kind = C_TOKEN_KIND_COMMENT,
         .span = span_from_lexer_savepoint(state, &prev),
+        .t_comment = (C_TokenComment) {
+            .text = content,
+            .is_multiline = true,
+        },
     };
-    out_token->t_comment.text = content;
-    out_token->t_comment.is_multiline = true;
     LEXING_OK(state);
 }
 
@@ -920,10 +1094,11 @@ lex_punct(LexerState *state, C_Token *out_token) {
 
     *out_token = (C_Token) {
         .kind = C_TOKEN_KIND_PUNCT,
-
         .span = span_from_lexer_savepoint(state, &prev),
+        .t_punct = (C_TokenPunct) {
+            .punct_kind = i,
+        },
     };
-    out_token->t_punct.punct_kind = i;
 
     LEXING_OK(state);
 }
@@ -1015,10 +1190,6 @@ lex_universal_char_name(LexerState *state, rune_t *out_rune) {
 //     *cur += 1;
 // }
 
-struct_def(C_TranslationUnitData, {
-
-})
-
 void
 lexer_intern_batch(LexerState *state, str_t *out_str) {
     uchar_t *ptr;
@@ -1039,57 +1210,65 @@ lexer_error_expected(LexerState *state, str_t expected) {
     // lexer_error(state, S("Expected: "));
 }
 
+
 LexingError
 lex_ident_or_keyword(LexerState *state, C_Token *out_token) {
     auto prev = lexer_save(state);
 
-    str_t content = (str_t) {
-        .ptr = lexer_rest(state).ptr,
-        .byte_len = 0,
-    };
-    uchar_t c = 0;
+    // str_t content = (str_t) {
+    //     .ptr = lexer_rest(state).ptr,
+    //     .byte_len = 0,
+    // };
+    auto string_batch = state->string_batch;
+    string_reset(string_batch);
+    uchar_t *c = string_end(string_batch);
     rune_t r = 0;
-    string_reset(state->string_batch);
 
     // first char
-    if (IS_ERR(lex_ascii_char_set(state, ASCII_SET_IDENT_NON_DIGIT, &c))) {
+    if (IS_ERR(lex_ascii_char_set(state, ASCII_SET_IDENT_NON_DIGIT, c))) {
         if (lexer_peek_rune(state) == '\\') {
             if (IS_ERR(lex_universal_char_name(state, &r))) {
                 lexer_error_expected(state, S("universal character name"));
                 return LEXING_ERROR(NONE);
             }
-            ASSERT_OK(string_append_rune(state->string_batch, r));
+            LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
+            c = string_end(string_batch);
         } else {
             return LEXING_ERROR(NONE);
         }
     } else {
-        content.byte_len += 1;
+        c += 1;
+        string_batch->byte_len += 1;
     }
 
     // rest
-    while (true) {
-        if (IS_ERR(lex_ascii_char_set(state, ASCII_SET_IDENT_NON_DIGIT, &c))) {
+    do { 
+        LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 16));
+    for_in_range(_, 0, string_batch->byte_cap)
+    {
+        if (IS_ERR(lex_ascii_char_set(state, ASCII_SET_IDENT, c))) {
             // ASSERT_OK(str_to_runes_in(content, &darr_allocator(state->string_batch)));
-            ASSERT_OK(string_append_str(state->string_batch, content));
+            // ASSERT_OK(string_append_str(state->string_batch, content));
 
             if (lexer_peek_rune(state) == '\\') {
                 if (IS_ERR(lex_universal_char_name(state, &r))) {
                     lexer_error_expected(state, S("universal character name"));
                     return LEXING_ERROR(NONE);
                 }
-                ASSERT_OK(string_append_rune(state->string_batch, r));
-                content = (str_t) {
-                        .ptr = lexer_rest(state).ptr,
-                        .byte_len = 0,
-                    };
+                LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
+                c = string_end(string_batch);
             } else {
-                break;
+                goto out;
             }
         } else {
-            content.byte_len += 1; // sizeof(uchar_t)
+            c += 1;
+            string_batch->byte_len += 1;
+            // content.byte_len += 1; // sizeof(uchar_t)
         }
-    }
+    }} while(1);
+    out:
 
+    str_t content;
     lexer_intern_batch(state, &content);
 
     usize_t i = 0;
@@ -1117,7 +1296,6 @@ lex_ident_or_keyword(LexerState *state, C_Token *out_token) {
 
 LexingError
 lex_pp_directive(LexerState *state, C_Token *out_token) {
-    unimplemented();
     auto prev = lexer_save(state);
 
     if (lexer_advance_rune(state) != '#') {
@@ -1126,12 +1304,12 @@ lex_pp_directive(LexerState *state, C_Token *out_token) {
 
     str_t s;
     if (IS_OK(lex_string(state, S("define"), &s))) {
-        // (*out_token) = (C_Token) {
-        //     .kind = C_TOKEN_KIND_PP_DIRECTIVE,
-        //     .t_pp_directive = (C_Token_PP_Diretive) {
-        //         .directive = C_PP_DIRECTIVE_DEFINE,
-        //     },
-        // };
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .dir_kind = C_PP_DIRECTIVE_DEFINE,
+            },
+        };
     } else {
         unimplemented();
     }
@@ -1173,8 +1351,9 @@ skip_whitespace(LexerState *state, darr_T(C_Token) *tokens, C_Token **cur_token)
 LexingError
 lexer_next_token(LexerState *state, C_Token *out_token) {
     auto prev = lexer_save(state);
-    rune_t r = lexer_peek_rune(state);
 
+retry:
+    rune_t r = lexer_peek_rune(state);
     switch (r)
     {
     case '\0':
@@ -1186,16 +1365,25 @@ lexer_next_token(LexerState *state, C_Token *out_token) {
         break;
     case '\\':
         lexer_advance_rune(state);
-        if (lexer_peek_rune(state) != '\n') {
-            if (lexer_peek_rune(state) != 'u') {
-                lexer_error(state, S("Stray '\\' character"));
-                return LEXING_ERROR(NONE);
-            }
-            // uni-char-name
-            lexer_restore(state, &prev);
-            goto ident;
+        if (lexer_peek_rune(state) != 'u') {
+            lexer_error(state, S("Stray '\\' character"));
+            return LEXING_ERROR(NONE);
         }
-        lexer_advance_rune_no_eol(state);
+        // uni-char-name
+        lexer_restore(state, &prev);
+        goto ident;
+        // lexer_advance_rune(state);
+        // if (lexer_peek_rune(state) != '\n') {
+        //     if (lexer_peek_rune(state) != 'u') {
+        //         lexer_error(state, S("Stray '\\' character"));
+        //         return LEXING_ERROR(NONE);
+        //     }
+        //     // uni-char-name
+        //     lexer_restore(state, &prev);
+        //     goto ident;
+        // }
+        // lexer_advance_rune_no_eol(state);
+        // goto retry;
         break;
     case ' ':
     case '\t':
@@ -1217,8 +1405,9 @@ lexer_next_token(LexerState *state, C_Token *out_token) {
                 lexer_advance_rune(state);
             }
         }
-        break;
+        goto retry;
     case '/':
+        auto prev = lexer_save(state);
         r = lexer_advance_rune(state);
         r = lexer_peek_rune(state);
         if (r == '/') {
@@ -1238,38 +1427,13 @@ lexer_next_token(LexerState *state, C_Token *out_token) {
         break;
     case '"':
         TRY(lex_string_literal(state, out_token));
-
-        // if (state->do_preprocessing) {
-        //     C_Token *first = out_token;
-        //     auto prev_len = tokens->len;
-        //     out_token += 1;
-        //     tokens->len += 1;
-
-        //     C_Token tok;
-        //     while (true) {
-        //         skip_whitespace(state, &tokens, &out_token);
-        //         if (lexer_peek_rune(state) != '"') {
-        //             break;
-        //         }
-        //         ASSERT_OK(lex_string_literal(state, &tok))
-
-        //         // CORRECTENSS: assumes arena is large enough and does allocation in a single chunk
-        //         first->t_str_lit.str.byte_len += tok.t_str_lit.str.byte_len;
-        //         first->span.e_byte_offset = tok.span.e_byte_offset;
-        //         first->span.e_line = tok.span.e_line;
-        //         first->span.e_col = tok.span.e_col;
-        //     }
-
-        //     out_token = first;
-        //     tokens->len = prev_len;
-        // }
         break;
     case '\'':
         TRY(lex_char_literal(state, out_token));
         break;
-    case '#':
-        TRY(lex_pp_directive(state, out_token));
-        break;
+    // case '#':
+    //     TRY(lex_pp_directive(state, out_token));
+    //     break;
     default:
         if (rune_is_ascii_ident_non_digit(r)) {
     ident:
@@ -1288,6 +1452,95 @@ lexer_next_token(LexerState *state, C_Token *out_token) {
     LEXING_OK(state);
 }
 
+INLINE
+bool
+c_token_is_space(C_Token *self) {
+    return self->kind == C_TOKEN_KIND_COMMENT ||
+            self->kind == C_TOKEN_KIND_NEW_LINE;
+}
+
+INLINE
+bool
+c_token_is_ident_or_keyword(C_Token *self) {
+    return self->kind == C_TOKEN_KIND_IDENT ||
+            self->kind == C_TOKEN_KIND_KEYWORD;
+}
+
+INLINE
+str_t
+c_token_ident_or_keyword_name(C_Token *self) {
+    if (self->kind == C_TOKEN_KIND_IDENT) {
+        return self->t_ident.name;
+    } else if (self->kind == C_TOKEN_KIND_KEYWORD) {
+        return c_keyword_str_from_kind(self->t_keyword.keyword_kind);
+    } else {
+        unreacheble();
+    }
+}
+
+
+void
+lexer_pp_expand(LexerState *state, darr_t tokens, darr_t *dd_tokens) {
+    if (*dd_tokens == nullptr) {
+        LEXER_ALLOC_HANDLE(darr_new_cap_in_T(C_Token, darr_len(tokens) * 2, &g_ctx.global_alloc, dd_tokens));
+    }
+
+    for_in_range(i, 0, darr_len(tokens)) {
+        auto tok = darr_get_T(C_Token, tokens, i);
+        if (c_token_is_ident_or_keyword(tok)) {
+            str_t ident = c_token_ident_or_keyword_name(tok);
+            darr_t *def = hashmap_get(state->pp_defs, &ident);
+            if (def) {
+                lexer_pp_expand(state, *def, dd_tokens);
+                continue;
+            }
+        }
+        LEXER_ALLOC_HANDLE(darr_push(dd_tokens, tok));
+    }
+}
+
+AllocatorError
+str_null_terminate_in(str_t self, Allocator *alloc, str_t *out_self) {
+    void *ptr;
+    TRY(allocator_alloc_n(alloc, uchar_t, str_len(self)+1, &ptr));
+    memcpy(ptr, self.ptr, str_len(self) * sizeof(uchar_t));
+    *((uchar_t *)ptr + str_len(self)) = '\0';
+
+    *out_self = (str_t) {
+        .ptr = ptr,
+        .byte_len = str_len(self),
+    };
+    return ALLOCATOR_ERROR(OK);
+}
+
+// for 
+#define WITH_FILE(path, mode, file, body) { \
+    str_t _path_; \
+    ASSERT_OK(str_null_terminate_in(path, &g_ctx.global_alloc, &_path_)); \
+    FILE *file = fopen((char *)_path_.ptr, mode); \
+    ASSERT(file != nullptr); \
+    body \
+    ASSERT(fclose(file) != EOF); \
+    allocator_free(&g_ctx.global_alloc, (void **)&_path_.ptr); \
+}
+usize_t file_get_size(FILE* file) {
+    usize_t init_pos = ftell(file);
+    fseek(file, 0, SEEK_END);
+    usize_t size = ftell(file);
+    fseek(file, init_pos, SEEK_SET);
+    return size;
+}
+
+AllocatorError
+file_read_full_str_in(FILE *file, Allocator *alloc, str_t *out_str) {
+    auto file_size = file_get_size(file);
+    void *ptr;
+    TRY(allocator_alloc_n(alloc, uchar_t, file_size, &ptr));
+    ASSERT(fread(ptr, sizeof(uchar_t), file_size, file) == file_size);
+    *out_str = str_from_ptr_len(ptr, file_size);
+    return ALLOCATOR_ERROR(OK);
+}
+
 /// when sublexer errors out:
 /// 1. sublexer prints error message
 /// 2. 'tokenize' abort on first error, cause it's probably unreasonable 
@@ -1301,12 +1554,274 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
     C_Token *cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
 
     while (true) {
+        auto prev = lexer_save(state);
+
         if (IS_ERR(lexer_next_token(state, cur_token))) {
             return LEXING_ERROR(NONE);
         }
         if (cur_token->kind == C_TOKEN_KIND_EOF) {
             tokens->len += 1;
             break;
+        }
+        if (state->do_preprocessing) {
+            if (cur_token->kind == C_TOKEN_KIND_PUNCT && cur_token->t_punct.punct_kind == C_PUNCT_HASH) {
+                TRY(lexer_next_token(state, cur_token));
+                if (cur_token->kind != C_TOKEN_KIND_IDENT) {
+                    lexer_error_expected(state, S("pp directive or identifier"));
+                    return LEXING_ERROR(NONE);
+                }
+                str_t directive_name = cur_token->t_ident.name;
+                if (str_eq(directive_name, S("define"))) {
+
+                    // TODO function-like macros
+                    auto save = lexer_save(state);
+                    str_t ident = (str_t) {};
+                    TRY(lexer_next_token(state, cur_token));
+                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
+                        ident = cur_token->t_ident.name;
+                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
+                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
+                    else {
+                        lexer_restore(state, &save);
+                        lexer_error(state, S("Unexpected token"));
+                        return LEXING_ERROR(NONE);
+                    }
+
+
+                    darr_t dd_tokens;
+                    darr_new_cap_in_T(C_Token, 16, &g_ctx.global_alloc, &dd_tokens);
+                    // C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
+
+                    while (true) {
+                        darr_reserve_cap(&dd_tokens, 1);
+                        C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, dd_tokens, darr_len(dd_tokens));
+                        if (IS_ERR(lexer_next_token(state, dir_cur_token))) {
+                            return LEXING_ERROR(NONE);
+                        }
+                        if (dir_cur_token->kind == C_TOKEN_KIND_EOF) {
+                            // unimplemented();
+                            // goto out;
+                            break;
+                        } else if (dir_cur_token->kind == C_TOKEN_KIND_NEW_LINE) {
+                            break;
+                        } else if (dir_cur_token->kind == C_TOKEN_KIND_PP_DIRECTIVE) {
+                            // TODO relax that for stringify
+                            lexer_error(state, S("Nested directives are not allowed"));
+                        }
+                        dd_tokens->len += 1;
+                    }
+
+                    darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &ident);
+                    if (def) {
+                        // TODO %s ident
+                        lexer_warn(state, S("redefinition of macro"));
+
+                        auto temp = *def;
+                        darr_free(&temp);
+                        // moved dd_tokens here
+                        *def = dd_tokens;
+                    } else {
+                        LEXER_ALLOC_HANDLE(hashmap_set(&state->pp_defs, &ident, &dd_tokens));
+                    }
+
+
+                    continue;
+                } else if (str_eq(directive_name, S("include"))) {
+                    // unimplemented();
+
+                    C_Token hname;
+                    str_t file_path;
+                    // TRY(lex_header_name(state, &hname));
+                    TRY(lexer_next_token(state, &hname));
+                    if (hname.kind == C_TOKEN_KIND_HEADER_NAME) {
+                        file_path = hname.t_header_name.name;
+                    } else if (hname.kind == C_TOKEN_KIND_STRING) {
+                        file_path = hname.t_str_lit.str;
+                    } else {
+                        lexer_error_expected(state, S("header name"));
+                        return LEXING_ERROR(NONE);
+                    }
+
+                    str_t include_text;
+
+                    TU_FileData *file_data = hashmap_get(state->file_data_table, &file_path);
+                    if (!file_data) {
+                        Allocator string_arena_allocator = arena_allocator(state->string_arena);
+                        WITH_FILE(file_path, "r", file, {
+                            LEXER_ALLOC_HANDLE(file_read_full_str_in(file, &string_arena_allocator, &include_text));
+                        })
+
+                        hashmap_set(&state->file_data_table, &file_path, &(TU_FileData) {.text = include_text});
+                        file_data = hashmap_get(state->file_data_table, &file_path);
+                    } else {
+                        include_text = file_data->text;
+                    }
+
+
+                    LexerState sub_lexer = *state;
+                    sub_lexer.text = include_text;
+                    sub_lexer.rest = include_text;
+                    lexer_init_cache(&sub_lexer);
+
+                    darr_t include_tokens;
+                    tokenize(&sub_lexer, &include_tokens);
+                    *cur_token = (C_Token) {
+                        .kind = C_TOKEN_KIND_INCLUDE,
+                        .span = cur_token->span,
+                        .t_include = (C_TokenInclude) {
+                            .file = file_path,
+                            .tokens = include_tokens,
+                        },
+                    };
+
+                } else if (str_eq(directive_name, S("ifdef"))) {
+                    auto save = lexer_save(state);
+                    str_t ident = (str_t) {};
+                    TRY(lexer_next_token(state, cur_token));
+                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
+                        ident = cur_token->t_ident.name;
+                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
+                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
+                    else {
+                        lexer_restore(state, &save);
+                        lexer_error(state, S("Unexpected token"));
+                        return LEXING_ERROR(NONE);
+                    }
+
+                    if (hashmap_get(state->pp_defs, &ident) != nullptr) {
+                        state->pp_if_depth += 1;
+                        continue;
+                    } else {
+                        goto pp_else;
+                    }
+
+                } else if (str_eq(directive_name, S("ifndef"))) {
+                    auto save = lexer_save(state);
+                    str_t ident = (str_t) {};
+                    TRY(lexer_next_token(state, cur_token));
+                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
+                        ident = cur_token->t_ident.name;
+                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
+                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
+                    else {
+                        lexer_restore(state, &save);
+                        lexer_error(state, S("Unexpected token"));
+                        return LEXING_ERROR(NONE);
+                    }
+
+                    if (hashmap_get(state->pp_defs, &ident) == nullptr) {
+                        state->pp_if_depth += 1;
+                    } else {
+                        // seek for #else or #endif
+                        pp_else:
+                        while(true) {
+                            TRY(lexer_next_token(state, cur_token));
+                            if (!(cur_token->kind == C_TOKEN_KIND_PUNCT && cur_token->t_punct.punct_kind == C_PUNCT_HASH)) {
+                                if (cur_token->kind == C_TOKEN_KIND_EOF) {
+                                    break;
+                                }
+                                continue;
+                            }
+
+                            TRY(lexer_next_token(state, cur_token));
+                            if (cur_token->kind != C_TOKEN_KIND_IDENT) {
+                                lexer_error_expected(state, S("pp directive or identifier"));
+                                return LEXING_ERROR(NONE);
+                            }
+                            str_t directive_name = cur_token->t_ident.name;
+                            if (!str_eq(directive_name, S("else")) && !str_eq(directive_name, S("endif"))) {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+
+                    continue;
+                } else if (str_eq(directive_name, S("else"))) {
+                    if (state->pp_if_depth == 0) {
+                        lexer_error(state, S("unexpected #else"));
+                        return LEXING_ERROR(NONE);
+                    }
+                    state->pp_if_depth -= 1;
+
+                    // seek for #endif
+                    while(true) {
+                        TRY(lexer_next_token(state, cur_token));
+                        if (!(cur_token->kind == C_TOKEN_KIND_PUNCT && cur_token->t_punct.punct_kind == C_PUNCT_HASH)) {
+                            if (cur_token->kind == C_TOKEN_KIND_EOF) {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        TRY(lexer_next_token(state, cur_token));
+                        if (cur_token->kind != C_TOKEN_KIND_IDENT) {
+                            lexer_error_expected(state, S("pp directive or identifier"));
+                            return LEXING_ERROR(NONE);
+                        }
+                        str_t directive_name = cur_token->t_ident.name;
+                        if (!str_eq(directive_name, S("endif"))) {
+                            continue;
+                        }
+                        break;
+                    }
+                    continue;
+
+                } else if (str_eq(directive_name, S("endif"))) {
+                    if (state->pp_if_depth == 0) {
+                        lexer_error(state, S("unexpected #endif"));
+                        return LEXING_ERROR(NONE);
+                    }
+                    state->pp_if_depth -= 1;
+                    continue;
+                } else {
+                    unimplemented();
+                }
+            } else if (c_token_is_ident_or_keyword(cur_token)) {
+                str_t ident = c_token_ident_or_keyword_name(cur_token);
+                darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &ident);
+                if (def) {
+                    // TODO function-like macros
+                    darr_t expanded = nullptr;
+                    lexer_pp_expand(state, *def, &expanded);
+                    LEXER_ALLOC_HANDLE(darr_reallocate_in(&expanded, &token_arena_allocator));
+                    *cur_token = (C_Token) {
+                        .kind = C_TOKEN_KIND_EXPAND,
+                        .span = cur_token->span,
+                        .t_expand = (C_TokenExpand) {
+                            .def_name = ident,
+                            .tokens = expanded,
+                        },
+                    };
+                }
+            } else if (cur_token->kind == C_TOKEN_KIND_STRING) {
+                // unimplemented()
+                C_Token *first = cur_token;
+                auto prev_len = tokens->len;
+
+                // C_Token tok;
+                while (true) {
+                    cur_token += 1;
+                    tokens->len += 1;
+                    if (IS_ERR(lexer_next_token(state, cur_token))) {
+                        return LEXING_ERROR(NONE);
+                    }
+                    if (c_token_is_space(cur_token)) {
+                        continue;
+                    } else if (cur_token->kind != C_TOKEN_KIND_STRING) {
+                        break;
+                    }
+
+                    // CORRECTNESS: assumes arena is large enough and does allocation in a single chunk
+                    first->t_str_lit.str.byte_len += cur_token->t_str_lit.str.byte_len;
+                    first->span.e_byte_offset = cur_token->span.e_byte_offset;
+                    first->span.e_line = cur_token->span.e_line;
+                    first->span.e_col = cur_token->span.e_col;
+
+                    cur_token = first;
+                    tokens->len = prev_len;
+                }
+            }
         }
 
         cur_token += 1;
@@ -1318,146 +1833,6 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
     LEXING_OK(state);
 }
 
-LexingError
-_tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
-    darr_T(C_Token) tokens;
-    Allocator token_arena_allocator = arena_allocator(state->token_arena);
-    darr_new_cap_in_T(C_Token, str_len(state->text)+1, &token_arena_allocator, &tokens);
-    C_Token *cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
-
-    while (true) {
-        auto prev = lexer_save(state);
-        rune_t r = lexer_peek_rune(state);
-
-        switch (r)
-        {
-        case '\0':
-            auto pos = lexer_pos(state);
-            *cur_token = (C_Token) {
-                .kind = C_TOKEN_KIND_EOF,
-                .span = span_from_lexer_pos(&pos, &pos),
-            };
-            tokens->len += 1;
-            goto out;
-            break;
-        case '\\':
-            lexer_advance_rune(state);
-            if (lexer_peek_rune(state) != '\n') {
-                if (lexer_peek_rune(state) != 'u') {
-                    lexer_error(state, S("Stray '\\' character"));
-                    return LEXING_ERROR(NONE);
-                }
-                // uni-char-name
-                lexer_restore(state, &prev);
-                goto ident;
-            }
-            lexer_advance_rune_no_eol(state);
-            break;
-        case ' ':
-        case '\t':
-        case '\n':
-            skip_whitespace(state, &tokens, &cur_token);
-            // while (true) {
-            //     if (!rune_is_space(lexer_peek_rune(state))) {
-            //         break;
-            //     }
-            //     if (lexer_peek_rune(state) == '\n') {
-            //         auto prev = lexer_save(state);
-            //         lexer_advance_rune(state);
-            //         *cur_token = (C_Token) {
-            //             .kind = C_TOKEN_KIND_NEW_LINE,
-            //             .span = span_from_lexer_savepoint(state, &prev),
-            //         };
-            //         cur_token += 1;
-            //         tokens->len += 1;
-            //     } else {
-            //         lexer_advance_rune(state);
-            //     }
-            // }
-            
-            continue;
-            break;
-        // case '\'':
-        //     TRY(lex_character_literal(state, cur_token));
-        //     break;
-        case '/':
-            r = lexer_advance_rune(state);
-            r = lexer_peek_rune(state);
-            if (r == '/') {
-                lexer_restore(state, &prev);
-                TRY(lex_comment(state, cur_token));
-            } else if (r == '*') {
-                lexer_restore(state, &prev);
-                TRY(lex_multiline_comment(state, cur_token));
-            } else {
-                *cur_token = (C_Token) {
-                    .kind = C_TOKEN_KIND_PUNCT,
-                    .span = span_from_lexer_savepoint(state, &prev),
-                };
-                cur_token->t_punct.punct_kind = C_PUNCT_SLASH;
-            }
-
-            break;
-        case '"':
-            TRY(lex_string_literal(state, cur_token));
-
-            if (state->do_preprocessing) {
-                C_Token *first = cur_token;
-                auto prev_len = tokens->len;
-                cur_token += 1;
-                tokens->len += 1;
-
-                C_Token tok;
-                while (true) {
-                    skip_whitespace(state, &tokens, &cur_token);
-                    if (lexer_peek_rune(state) != '"') {
-                        break;
-                    }
-                    ASSERT_OK(lex_string_literal(state, &tok))
-
-                    // CORRECTENSS: assumes arena is large enough and does allocation in a single chunk
-                    first->t_str_lit.str.byte_len += tok.t_str_lit.str.byte_len;
-                    first->span.e_byte_offset = tok.span.e_byte_offset;
-                    first->span.e_line = tok.span.e_line;
-                    first->span.e_col = tok.span.e_col;
-                }
-
-                cur_token = first;
-                tokens->len = prev_len;
-            }
-            break;
-        case '\'':
-            TRY(lex_char_literal(state, cur_token));
-            break;
-        case '#':
-            if (!state->do_preprocessing) {
-                goto punct;
-            }         
-
-            TRY(lex_pp_directive(state, cur_token));
-            continue;
-        default:
-            if (rune_is_ascii_ident_non_digit(r)) {
-        ident:
-                TRY(lex_ident_or_keyword(state, cur_token));
-            } else if (rune_is_punct(r)) {
-        punct:
-                TRY(lex_punct(state, cur_token));
-                break;
-            } else {
-                lexer_error(state, S("Unexpected character"));
-                panic();
-            }
-            break;
-        }
-        cur_token += 1;
-        tokens->len += 1;
-    }
-out:
-
-    *out_tokens = tokens;
-    return LEXING_ERROR(OK);
-}
 
 
 FmtError
@@ -1477,6 +1852,9 @@ token_kind_dbg_fmt(C_TokenKind *kind, StringFormatter *fmt) {
     enum_item_case_fmt_write(C_TOKEN_KIND_NUMBER)
     enum_item_case_fmt_write(C_TOKEN_KIND_PUNCT)
     enum_item_case_fmt_write(C_TOKEN_KIND_COMMENT)
+    enum_item_case_fmt_write(C_TOKEN_KIND_PP_DIRECTIVE)
+    enum_item_case_fmt_write(C_TOKEN_KIND_INCLUDE)
+    enum_item_case_fmt_write(C_TOKEN_KIND_EXPAND)
     enum_item_case_fmt_write(C_TOKEN_KIND_NEW_LINE)
     enum_item_case_fmt_write(C_TOKEN_KIND_EOF)
     
@@ -1567,14 +1945,49 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
 }
 
 
+struct_def(C_TranslationUnitData, {
+    str_t main_file;
+    hashmap_T(str_t, TU_FileData) file_data_table;
+    darr_T(C_Token) tokens;
+})
+
+// void
+// c_trans_unit_tokenize(str_t main_file_path, C_TranslationUnitData *out_self) {
+//     LexerState state;
+//     lexer_init_default(&state);
+//     Allocator string_arena_allocator = arena_allocator(state->string_arena);
+//     WITH_FILE(file_path, "r", file, {
+//         LEXER_ALLOC_HANDLE(file_read_full_str_in(file, &string_arena_allocator, &include_text));
+//     })
+//     hashmap_set(&state->file_data_table, &file_path, &(TU_FileData) {.text = include_text});
+// }
+
 void
-dbg_print_tokens(darr_T(C_Token) tokens, str_t text) {
+dbg_print_tokens(darr_T(C_Token) tokens, str_t text, 
+    hashmap_T(str_t, TU_FileData) file_data_table) 
+{
     for_in_range(i, 0, darr_len(tokens)) {
+        auto tok = darr_get_T(C_Token, tokens, i);
+        if (tok->kind == C_TOKEN_KIND_EXPAND) {
+            dbg_print_tokens(tok->t_expand.tokens, text, file_data_table);
+        } else if (tok->kind == C_TOKEN_KIND_INCLUDE) {
+            str_t text = *hashmap_get_T(str_t, file_data_table, &tok->t_include.file);
+            dbg_print_tokens(tok->t_include.tokens, text, file_data_table);
+        }
+        else {
+            dbgp(c_token, darr_get_T(C_Token, tokens, i), &text);
+        }
         // print_token_by_span(darr_get_T(Token, tokens, i), text);
-        dbgp(c_token, darr_get_T(C_Token, tokens, i), &text);
         // println(str, &S(""));
+        // dbgp(c_token, darr_get_T(C_Token, tokens, i), &text);
     }
     println(str, &S(""));
+}
+
+void
+c_trans_unit_dbg_print_tokens(C_TranslationUnitData *self) {
+    auto fdata = hashmap_get_T(TU_FileData, self->file_data_table, &self->main_file);
+    dbg_print_tokens(self->tokens, fdata->text, self->file_data_table);
 }
 
 #endif // DBG_PRINT

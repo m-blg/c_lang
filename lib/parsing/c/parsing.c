@@ -529,12 +529,17 @@ out:
 // hash_map_T(str_t, C_Type) c_type_table;
 
 
-struct_def(ParserState, {
+struct_def(C_TokenIteratorEntry, {
     slice_T(C_Token) tokens; 
     usize_t cur;
+})
+
+struct_def(ParserState, {
+    darr_T(C_TokenIterEntry) parse_stack;
 
     Allocator ast_alloc;
 })
+
 
 enum_def(ParsingError, 
     PARSING_ERROR_OK,
@@ -545,11 +550,12 @@ enum_def(ParsingError,
 
 #define BOUNDS_ASSERT(x) ASSERT(x)
 
-// INLINE
-// void
-// parser_init_default(ParserState *state, darr_T(C_Token) tokens) {
-//     state
-// }
+INLINE
+void
+parser_init_default(ParserState *state, C_TranslationUnitData *tu) {
+    darr_new_cap_in_T(C_TokenIteratorEntry, slice_len(&tu->file_data_table->keys), &g_ctx.global_alloc);
+
+}
 
 INLINE
 C_Token *
@@ -562,10 +568,31 @@ INLINE
 C_Token *
 parser_advance(ParserState *state) {
     BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
-    auto tok = slice_get_T(C_Token, &state->tokens, state->cur);
-    if (state->cur < slice_len(&state->tokens)-1) {
+
+    C_Token *tok = slice_get_T(C_Token, &state->tokens, state->cur);
+
+    while (true) {
+        tok = slice_get_T(C_Token, &state->tokens, state->cur);
+        if (tok->kind == C_TOKEN_KIND_EOF) {
+            return tok;
+        }
         state->cur += 1;
+        if (tok->kind == C_TOKEN_KIND_NEW_LINE) {
+            continue;
+        }
+        return tok;
     }
+}
+INLINE
+C_Token *
+parser_advance_no_skip(ParserState *state) {
+    BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
+
+    C_Token *tok = slice_get_T(C_Token, &state->tokens, state->cur);
+    if (tok->kind == C_TOKEN_KIND_EOF) {
+        return tok;
+    }
+    state->cur += 1;
     return tok;
 }
 
@@ -603,7 +630,7 @@ parser_error(ParserState *state, str_t msg) {
         .col = span->b_col,
         .file_path = span->file_path,
     };
-    lexer_error_print(msg, S(""), pos);
+    lexer_error_print(msg, S(""), pos, LOG_LEVEL_ERROR);
 }
 
 C_ParserSpan

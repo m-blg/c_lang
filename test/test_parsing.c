@@ -387,7 +387,7 @@ test5() {
     darr_t tokens;
     ASSERT_OK(tokenize(&state, &tokens));
 
-    // print_tokens(tokens, text);
+    dbg_print_tokens(tokens, text, state.file_data_table);
     // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
 
 
