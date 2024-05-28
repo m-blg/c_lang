@@ -165,7 +165,11 @@ slice_t g_c_punct_vals = slice_lit(
     S("^"),
     S("|"),
 
-    S("=")
+    S("="),
+
+#ifdef EXTENDED_C
+    S("@")
+#endif // EXTENDED_C
     );
 
 
@@ -227,7 +231,41 @@ enum_def(C_PunctKind,
     C_PUNCT_CARET,
     C_PUNCT_PIPE,
 
-    C_PUNCT_EQUAL
+    C_PUNCT_EQUAL,
+
+#ifdef EXTENDED_C
+    C_PUNCT_AT,
+#endif // EXTENDED_C
 )
 
 #define c_punct_str_from_kind(kind) (*slice_get_T(str_t, &g_c_punct_vals, (kind)))
+
+#define C_TYPE_LIST \
+    ENT(U8), \
+    ENT(U16), \
+    ENT(U32), \
+    ENT(U64), \
+    ENT(I8), \
+    ENT(I16), \
+    ENT(I32), \
+    ENT(I64), \
+    ENT(VOID), \
+    ENT(BOOL), \
+    ENT(CHAR), \
+\
+    ENT(SHORT), \
+    ENT(USHORT), \
+\
+    ENT(INT), /* "" */ \
+    ENT(LONG), /* "l" */ \
+    ENT(LLONG), /* "ll" */ \
+    ENT(UINT), /* "u" */ \
+    ENT(ULONG), /* "lu" */ \
+    ENT(ULLONG) /* "llu" */ \
+
+typedef enum C_PrimitiveType C_PrimitiveType;
+enum C_PrimitiveType { 
+    #define ENT(T) C_PRIMITIVE_TYPE_##T
+    C_TYPE_LIST
+    #undef ENT
+};
