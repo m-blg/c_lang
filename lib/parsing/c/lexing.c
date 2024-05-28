@@ -57,7 +57,7 @@ enum_def(C_TokenKind,
     C_TOKEN_KIND_PUNCT,
     C_TOKEN_KIND_COMMENT,
     C_TOKEN_KIND_PP_DIRECTIVE,
-    C_TOKEN_KIND_HEADER_NAME,
+    // C_TOKEN_KIND_HEADER_NAME,
     C_TOKEN_KIND_INCLUDE,
     C_TOKEN_KIND_EXPAND,
     C_TOKEN_KIND_NEW_LINE,
@@ -103,10 +103,9 @@ struct_def(C_TokenCharLiteral, {
     rune_t rune;
 })
 struct_def(C_TokenNumLiteral, {
-    union {
-        usize_t uval;
-        isize_t ival;
-    };
+    str_t lit; // in case of float may contain '.'
+    u8_t base; // 2, 8, 10, 16
+    C_PrimitiveType type; // u, ul, ll, ...
 })
 /// appears in place of #include directive
 struct_def(C_TokenInclude, {
@@ -136,8 +135,33 @@ enum_def(C_PP_DirectiveKind,
     C_PP_DIRECTIVE_ENDIF
 )
 
+struct_def(C_Token_PPD_Define, {
+    str_t name;
+    darr_T(C_Token) tokens;
+})
+struct_def(C_Token_PPD_Undef, {
+    str_t name;
+})
+struct_def(C_Token_PPD_Ifdef, {
+    str_t name;
+})
+struct_def(C_Token_PPD_Ifndef, {
+    str_t name;
+})
+struct_def(C_Token_PPD_Include, {
+    str_t file;
+    uchar_t brackets; // '<', '"' or '\0'(ident)
+})
+
 struct_def(C_Token_PP_Directive, {
-    C_PP_DirectiveKind dir_kind;
+    C_PP_DirectiveKind pp_dir_kind;
+    union {
+        C_Token_PPD_Define ppd_define;
+        C_Token_PPD_Undef ppd_undef;
+        C_Token_PPD_Ifdef ppd_ifdef;
+        C_Token_PPD_Ifndef ppd_ifndef;
+        C_Token_PPD_Include ppd_include;
+    };
 })
 
 struct_def(C_TokenHeaderName, {
@@ -184,6 +208,7 @@ struct_def(LexerState, {
     //# preprocessing
     slice_T(str_t) include_filepaths;
     bool do_preprocessing;
+    bool in_macro;
     hashmap_T(str_t, darr_T(C_Token)) pp_defs;
     // darr_T(C_PP_Directive) pp_if_stack; // conditions pp-directives
     usize_t pp_if_depth; // conditions pp-directives
@@ -430,11 +455,11 @@ lexer_deinit(LexerState *self) {
 
 void
 lexer_error(LexerState *state, str_t msg) {
-    lexer_error_print(msg, S(""), lexer_pos(state), LOG_LEVEL_ERROR);
+    state->error(msg, S(""), lexer_pos(state), LOG_LEVEL_ERROR);
 }
 void
 lexer_warn(LexerState *state, str_t msg) {
-    lexer_error_print(msg, S(""), lexer_pos(state), LOG_LEVEL_WARN);
+    state->error(msg, S(""), lexer_pos(state), LOG_LEVEL_WARN);
 }
 
 void
@@ -665,6 +690,22 @@ lexer_peek_rune(LexerState *state) {
     return state->cache_cur_rune;
 }
 
+rune_t
+lexer_peek_rune2(LexerState *state) {
+    if (str_len(state->cache_rest) == 0) {
+        return '\0';
+    }
+
+    rune_t r;
+    str_t s;
+    auto e = str_next_rune(state->cache_rest, &r, &s);
+    if (e != UTF8_ERROR(OK)) {
+        state->utf8_error_handler(e, lexer_pos(state), S(""), nullptr);
+        return 0;
+    }
+    return r;
+}
+
 // #define lexer_advance_rune lexer_advance_rune_no_cache
 // #define lexer_peek_rune lexer_peek_rune_no_cache
 
@@ -726,7 +767,16 @@ ascii_char_set_is_in(uchar_t c, ASCII_CharSet set) {
     .bits[3] = 0b0000'0011'1111'1111,\
     .bits[4] = 0b0000'0000'0111'1110,\
     .bits[6] = 0b0000'0000'0111'1110,\
-})\
+})
+#define ASCII_SET_DEC_DIGIT ((ASCII_CharSet) {\
+    .bits[3] = 0b0000'0011'1111'1111,\
+})
+#define ASCII_SET_OCT_DIGIT ((ASCII_CharSet) {\
+    .bits[3] = 0b0000'0000'1111'1111,\
+})
+#define ASCII_SET_BIN_DIGIT ((ASCII_CharSet) {\
+    .bits[3] = 0b0000'0000'0000'0011,\
+})
 
 /// @param[in, out] state
 /// @param[out] out_char
@@ -961,10 +1011,26 @@ rune_is_punct(rune_t r) {
     return false;
     // unimplemented();
 }
+
+INLINE
+bool
+rune_is_number_end(rune_t r) {
+    return (rune_is_punct(r) && r != '.') || rune_is_space(r) || r == '\0';
+}
+
+INLINE
+bool
+rune_is_in_ascii_set(rune_t r, ASCII_CharSet set) {
+    if (r > 255) {
+        return false;
+    }
+    return ascii_char_set_is_in((uchar_t)r, set);
+}
+
 INLINE
 bool
 rune_is_ascii_ident_non_digit(rune_t r) {
-    if (r > 256) {
+    if (r > 255) {
         return false;
     }
     return ascii_char_set_is_in((uchar_t)r, ASCII_SET_IDENT_NON_DIGIT);
@@ -972,10 +1038,18 @@ rune_is_ascii_ident_non_digit(rune_t r) {
 INLINE
 bool
 rune_is_ascii_punct(rune_t r) {
-    if (r > 256) {
+    if (r > 255) {
         return false;
     }
     return ascii_char_set_is_in((uchar_t)r, ASCII_SET_PUNCT);
+}
+INLINE
+bool
+rune_is_ascii_dec_digit(rune_t r) {
+    if (r > 255) {
+        return false;
+    }
+    return ascii_char_set_is_in((uchar_t)r, ASCII_SET_DEC_DIGIT);
 }
 
 LexingError
@@ -984,6 +1058,7 @@ lex_comment(LexerState *state, C_Token *out_token) {
     str_t content;
     if (IS_ERR(lex_string(state, S("//"), &content))) {
         lexer_error(state, S("Comment was expected here"));
+        LEXING_NONE(state, &prev);
     }
     while (true)
     {
@@ -1012,12 +1087,13 @@ lex_multiline_comment(LexerState *state, C_Token *out_token) {
     str_t content;
     if (lex_string(state, S("/*"), &content) != LEXING_ERROR(OK)) {
         lexer_error(state, S("Comment was expected here"));
+        LEXING_NONE(state, &prev);
     }
 
     auto string_batch = state->string_batch;
     string_reset(string_batch);
-    uchar_t *c = string_end(string_batch);
-    rune_t r = 0;
+    // uchar_t *c = string_end(string_batch);
+    // rune_t r = 0;
 
     do { 
         LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 16));
@@ -1100,6 +1176,117 @@ lex_punct(LexerState *state, C_Token *out_token) {
         },
     };
 
+    LEXING_OK(state);
+}
+
+
+LexingError
+lex_number(LexerState *state, C_Token *out_token) {
+    auto prev = lexer_save(state);
+
+    auto string_batch = state->string_batch;
+    string_reset(string_batch);
+
+    rune_t r = lexer_advance_rune(state);
+    u8_t base = 0;
+    C_PrimitiveType type = C_PRIMITIVE_TYPE_INT;
+    ASCII_CharSet char_set;
+
+    if ('0' <= r && r <= '9') {
+        if (r == '0') {
+            r = lexer_advance_rune(state);
+            if (rune_is_number_end(r) || r == 'u' || r == 'U' || r == 'l' || r == 'L') {
+                base = 10;
+                char_set = ASCII_SET_DEC_DIGIT;
+                string_append_rune(string_batch, 0);
+            } else if (r == '.') {
+                unimplemented();
+            } else if (r == 'x') {
+                base = 16;
+                char_set = ASCII_SET_HEX_DIGIT;
+            } else if (r == 'b') {
+                base = 2;
+                char_set = ASCII_SET_BIN_DIGIT;
+            } else if ('0' <= r && r <= '9') {
+                if (r > '7') {
+                    lexer_error(state, S("invalid digit in octal number"));
+                    LEXING_NONE(state, &prev);
+                }
+                base = 8;
+                char_set = ASCII_SET_OCT_DIGIT;
+                string_append_rune(string_batch, r);
+            } else {
+                lexer_error(state, S("unexpected symbol"));
+                LEXING_NONE(state, &prev);
+            }
+        } else {
+            base = 10;
+            char_set = ASCII_SET_DEC_DIGIT;
+            string_append_rune(string_batch, r);
+        }
+    } else if (r == '.') {
+        unimplemented();
+    } else {
+        lexer_error(state, S("number was expected here"));
+        LEXING_NONE(state, &prev);
+    }
+
+    // if (base == 10) {
+    // } else if (base == 16) {
+    // } else if (base == 2) {
+    // } else if (base == 8) {
+
+    // } else {
+    //     unreacheble();
+    // }
+    r = lexer_peek_rune(state);
+    if (rune_is_in_ascii_set(r, char_set)) {
+        LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 64));
+        while (true) {
+            r = lexer_advance_rune(state);
+            if (rune_is_in_ascii_set(r, char_set)) {
+                string_append_rune(string_batch, r);
+            } else {
+                break;
+            }
+        }
+    }
+
+    if (r == 'u' || r == 'U' || r == 'l' || r == 'L') {
+        unimplemented();
+    } else if (r == '.') {
+        unimplemented();
+    } else if (!rune_is_number_end(r)) {
+        lexer_error(state, S("unexpected symbol"));
+        LEXING_NONE(state, &prev);
+    }
+
+    // do { 
+    //     LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 16));
+    // for_in_range(_, 0, string_batch->byte_cap)
+    // {
+    //     string_append_rune(string_batch, r);
+    //     lexer_advance_rune(state);
+    // }} while(1);
+    // out:
+
+    str_t content;
+    lexer_intern_batch(state, &content);
+
+    // content = (str_t) {
+    //     .ptr = prev.rest.ptr + 2,
+    //     .byte_len = (uintptr_t)lexer_rest(state).ptr - (uintptr_t)prev.rest.ptr - 5,
+    // };
+
+    *out_token = (C_Token) {
+        .kind = C_TOKEN_KIND_NUMBER,
+        .span = span_from_lexer_savepoint(state, &prev),
+        .t_num_lit = (C_TokenNumLiteral) {
+            .lit = content,
+            .base = base,
+            .type = type,
+        },
+    };
     LEXING_OK(state);
 }
 
@@ -1295,24 +1482,235 @@ lex_ident_or_keyword(LexerState *state, C_Token *out_token) {
 
 
 LexingError
+lexer_next_token(LexerState *state, C_Token *out_token);
+
+LexingError
 lex_pp_directive(LexerState *state, C_Token *out_token) {
     auto prev = lexer_save(state);
 
     if (lexer_advance_rune(state) != '#') {
+        lexer_error_expected(state, S("pp directive"));
+        LEXING_NONE(state, &prev);
+    }
+    if (lexer_peek_rune(state) == '#') {
+        lexer_error(state, S("stray ##"));
         LEXING_NONE(state, &prev);
     }
 
-    str_t s;
-    if (IS_OK(lex_string(state, S("define"), &s))) {
+    // to prevent recursive calls when using lexer_next_token(...)
+    state->in_macro = true;
+
+    C_Token _tok;
+    C_Token *cur_token = &_tok;
+    if (IS_ERR(lexer_next_token(state, cur_token)) || 
+        cur_token->kind != C_TOKEN_KIND_IDENT) 
+    {
+        lexer_error_expected(state, S("pp directive"));
+        state->in_macro = false;
+        LEXING_NONE(state, &prev);
+    }
+    str_t directive_name = cur_token->t_ident.name;
+
+    if (str_eq(directive_name, S("define"))) {
+
+        // TODO function-like macros
+        // auto save = lexer_save(state);
+        str_t ident = (str_t) {};
+        TRY(lexer_next_token(state, cur_token));
+        if (cur_token->kind == C_TOKEN_KIND_IDENT) {
+            ident = cur_token->t_ident.name;
+        } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) {
+            ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
+        } else {
+            // lexer_restore(state, &save);
+            lexer_error(state, S("Unexpected token"));
+            state->in_macro = false;
+            LEXING_NONE(state, &prev);
+        }
+
+        if (lexer_peek_rune(state) == '(') {
+            unimplemented();
+        }
+
+
+
+        darr_t dd_tokens;
+        darr_new_cap_in_T(C_Token, 16, &g_ctx.global_alloc, &dd_tokens);
+        // C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
+
+        while (true) {
+            darr_reserve_cap(&dd_tokens, 1);
+            C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, dd_tokens, darr_len(dd_tokens));
+            if (IS_ERR(lexer_next_token(state, dir_cur_token))) {
+                state->in_macro = false;
+                return LEXING_ERROR(NONE);
+            }
+            if (dir_cur_token->kind == C_TOKEN_KIND_EOF) {
+                // unimplemented();
+                // goto out;
+                break;
+            } else if (dir_cur_token->kind == C_TOKEN_KIND_NEW_LINE) {
+                break;
+            } else if (dir_cur_token->kind == C_TOKEN_KIND_PP_DIRECTIVE) {
+                // TODO relax that for stringify
+                unreacheble();
+                // lexer_error(state, S("Nested directives are not allowed"));
+            }
+            dd_tokens->len += 1;
+        }
+
         (*out_token) = (C_Token) {
             .kind = C_TOKEN_KIND_PP_DIRECTIVE,
             .t_pp_directive = (C_Token_PP_Directive) {
-                .dir_kind = C_PP_DIRECTIVE_DEFINE,
+                .pp_dir_kind = C_PP_DIRECTIVE_DEFINE,
+                .ppd_define = (C_Token_PPD_Define) {
+                    // ident is either in string_arena or read-only mem
+                    .name = ident,
+                    .tokens = dd_tokens,
+                },
             },
         };
-    } else {
+
+        // darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &ident);
+        // if (def) {
+        //     // TODO %s ident
+        //     lexer_warn(state, S("redefinition of macro"));
+
+        //     auto temp = *def;
+        //     darr_free(&temp);
+        //     // moved dd_tokens here
+        //     *def = dd_tokens;
+        // } else {
+        //     LEXER_ALLOC_HANDLE(hashmap_set(&state->pp_defs, &ident, &dd_tokens));
+        // }
+    } else if (str_eq(directive_name, S("undef"))) {
+        #define SINGLE_IDENT_MACRO_BODY() \
+            str_t ident = (str_t) {}; \
+            TRY(lexer_next_token(state, cur_token)); \
+            if (cur_token->kind == C_TOKEN_KIND_IDENT) { \
+                ident = cur_token->t_ident.name; \
+            } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) { \
+                ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind); \
+            } else { \
+                /* lexer_restore(state, &save); */ \
+                lexer_error(state, S("Unexpected token")); \
+                state->in_macro = false; \
+                LEXING_NONE(state, &prev); \
+            } \
+            TRY(lexer_next_token(state, cur_token)); \
+            if (cur_token->kind != C_TOKEN_KIND_NEW_LINE && cur_token->kind != C_TOKEN_KIND_EOF) { \
+                lexer_error(state, S("Unexpected token")); \
+                state->in_macro = false; \
+                LEXING_NONE(state, &prev); \
+            } \
+
+
+        SINGLE_IDENT_MACRO_BODY();
+
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_UNDEF,
+                .ppd_undef = (C_Token_PPD_Undef) {
+                    .name = ident,
+                },
+            },
+        };
+    } else if (str_eq(directive_name, S("include"))) {
+        if (IS_ERR(lexer_next_token(state, cur_token))) {
+            lexer_error_expected(state, S("pp directive"));
+            state->in_macro = false;
+            LEXING_NONE(state, &prev);
+        }
+        uchar_t brackets = 0;
+        str_t ident;
+        if (cur_token->kind == C_TOKEN_KIND_STRING) {
+            brackets = '"';
+            ident = cur_token->t_str_lit.str;
+        } else if (cur_token->kind == C_TOKEN_KIND_PUNCT) {
+            brackets = '<';
+            unimplemented();
+        } else if (cur_token->kind == C_TOKEN_KIND_IDENT) {
+            brackets = '\0';
+            ident = cur_token->t_ident.name;
+        }
+
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_INCLUDE,
+                .ppd_include = (C_Token_PPD_Include) {
+                    .file = ident,
+                    .brackets = brackets,
+                },
+            },
+        };
+    } else if (str_eq(directive_name, S("ifndef"))) {
+        SINGLE_IDENT_MACRO_BODY();
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_IFNDEF,
+                .ppd_ifndef = (C_Token_PPD_Ifndef) {
+                    .name = ident,
+                },
+            },
+        };
+    } else if (str_eq(directive_name, S("ifdef"))) {
+        SINGLE_IDENT_MACRO_BODY();
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_IFDEF,
+                .ppd_ifdef = (C_Token_PPD_Ifdef) {
+                    .name = ident,
+                },
+            },
+        };
+    } else if (str_eq(directive_name, S("else"))) {
+    #define NO_IDENT_MACRO_BODY() \
+        TRY(lexer_next_token(state, cur_token)); \
+        if (cur_token->kind != C_TOKEN_KIND_NEW_LINE && cur_token->kind != C_TOKEN_KIND_EOF) { \
+            lexer_error(state, S("Unexpected token")); \
+            state->in_macro = false; \
+            LEXING_NONE(state, &prev); \
+        } \
+
+        NO_IDENT_MACRO_BODY();
+
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_ELSE,
+            },
+        };
+    } else if (str_eq(directive_name, S("endif"))) {
+        NO_IDENT_MACRO_BODY();
+
+        (*out_token) = (C_Token) {
+            .kind = C_TOKEN_KIND_PP_DIRECTIVE,
+            .t_pp_directive = (C_Token_PP_Directive) {
+                .pp_dir_kind = C_PP_DIRECTIVE_ENDIF,
+            },
+        };
+    } else if (str_eq(directive_name, S("elif"))) {
         unimplemented();
+    } else if (str_eq(directive_name, S("if"))) {
+        unimplemented();
+    } else if (str_eq(directive_name, S("line"))) {
+        unimplemented();
+    } else if (str_eq(directive_name, S("pragma"))) {
+        unimplemented();
+    } else if (str_eq(directive_name, S("error"))) {
+        unimplemented();
+    } else {
+        unreacheble();
     }
+
+    #undef SINGLE_IDENT_MACRO_BODY
+    #undef NO_IDENT_MACRO_BODY
+    
+    state->in_macro = false;
     return LEXING_ERROR(OK);
 }
 
@@ -1364,13 +1762,13 @@ retry:
         };
         break;
     case '\\':
-        lexer_advance_rune(state);
-        if (lexer_peek_rune(state) != 'u') {
+        // lexer_advance_rune(state);
+        if (lexer_peek_rune2(state) != 'u') {
             lexer_error(state, S("Stray '\\' character"));
             return LEXING_ERROR(NONE);
         }
         // uni-char-name
-        lexer_restore(state, &prev);
+        // lexer_restore(state, &prev);
         goto ident;
         // lexer_advance_rune(state);
         // if (lexer_peek_rune(state) != '\n') {
@@ -1407,14 +1805,10 @@ retry:
         }
         goto retry;
     case '/':
-        auto prev = lexer_save(state);
-        r = lexer_advance_rune(state);
-        r = lexer_peek_rune(state);
+        r = lexer_peek_rune2(state);
         if (r == '/') {
-            lexer_restore(state, &prev);
             TRY(lex_comment(state, out_token));
         } else if (r == '*') {
-            lexer_restore(state, &prev);
             TRY(lex_multiline_comment(state, out_token));
         } else {
             *out_token = (C_Token) {
@@ -1423,7 +1817,14 @@ retry:
             };
             out_token->t_punct.punct_kind = C_PUNCT_SLASH;
         }
-
+        break;
+    case '.':
+        r = lexer_peek_rune2(state);
+        if (rune_is_ascii_dec_digit(r)) {
+            goto number;
+        } else {
+            goto punct;
+        }
         break;
     case '"':
         TRY(lex_string_literal(state, out_token));
@@ -1431,20 +1832,25 @@ retry:
     case '\'':
         TRY(lex_char_literal(state, out_token));
         break;
-    // case '#':
-    //     TRY(lex_pp_directive(state, out_token));
-    //     break;
+    case '#':
+        if (state->in_macro) {
+            goto punct;
+        }
+        TRY(lex_pp_directive(state, out_token));
+        break;
     default:
         if (rune_is_ascii_ident_non_digit(r)) {
-    ident:
+        ident:
             TRY(lex_ident_or_keyword(state, out_token));
         } else if (rune_is_punct(r)) {
-    // punct:
+        punct:
             TRY(lex_punct(state, out_token));
-            break;
+        } else if (rune_is_ascii_dec_digit(r)) {
+        number:
+            TRY(lex_number(state, out_token));
         } else {
             lexer_error(state, S("Unexpected character"));
-            panic();
+            LEXING_NONE(state, &prev);
         }
         break;
     }
@@ -1541,6 +1947,32 @@ file_read_full_str_in(FILE *file, Allocator *alloc, str_t *out_str) {
     return ALLOCATOR_ERROR(OK);
 }
 
+
+AllocatorError
+file_data_table_load_file(hashmap_T(str_t, TU_FileData) *file_data_table, str_t file_path, void *include_info,
+        Allocator *alloc) 
+{
+    str_t text;
+    WITH_FILE(file_path, "r", file, {
+        TRY(file_read_full_str_in(file, alloc, &text));
+    })
+    hashmap_set(file_data_table, &file_path, &(TU_FileData) {.text = text});
+
+    return ALLOCATOR_ERROR(OK);
+}
+AllocatorError
+file_data_table_get_or_load_file(hashmap_T(str_t, TU_FileData) *file_data_table, str_t file_path, void *include_info,
+        Allocator *alloc, TU_FileData **out_fdata) 
+{
+    TU_FileData *file_data = hashmap_get(*file_data_table, &file_path);
+    if (!file_data) {
+        TRY(file_data_table_load_file(file_data_table, file_path, include_info, alloc));
+        file_data = hashmap_get(*file_data_table, &file_path);
+    }
+    *out_fdata = file_data;
+    return ALLOCATOR_ERROR(OK);
+}
+
 /// when sublexer errors out:
 /// 1. sublexer prints error message
 /// 2. 'tokenize' abort on first error, cause it's probably unreasonable 
@@ -1554,7 +1986,7 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
     C_Token *cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
 
     while (true) {
-        auto prev = lexer_save(state);
+        // auto prev = lexer_save(state);
 
         if (IS_ERR(lexer_next_token(state, cur_token))) {
             return LEXING_ERROR(NONE);
@@ -1564,54 +1996,10 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
             break;
         }
         if (state->do_preprocessing) {
-            if (cur_token->kind == C_TOKEN_KIND_PUNCT && cur_token->t_punct.punct_kind == C_PUNCT_HASH) {
-                TRY(lexer_next_token(state, cur_token));
-                if (cur_token->kind != C_TOKEN_KIND_IDENT) {
-                    lexer_error_expected(state, S("pp directive or identifier"));
-                    return LEXING_ERROR(NONE);
-                }
-                str_t directive_name = cur_token->t_ident.name;
-                if (str_eq(directive_name, S("define"))) {
-
-                    // TODO function-like macros
-                    auto save = lexer_save(state);
-                    str_t ident = (str_t) {};
-                    TRY(lexer_next_token(state, cur_token));
-                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
-                        ident = cur_token->t_ident.name;
-                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
-                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
-                    else {
-                        lexer_restore(state, &save);
-                        lexer_error(state, S("Unexpected token"));
-                        return LEXING_ERROR(NONE);
-                    }
-
-
-                    darr_t dd_tokens;
-                    darr_new_cap_in_T(C_Token, 16, &g_ctx.global_alloc, &dd_tokens);
-                    // C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, tokens, 0);
-
-                    while (true) {
-                        darr_reserve_cap(&dd_tokens, 1);
-                        C_Token *dir_cur_token = darr_get_unchecked_T(C_Token, dd_tokens, darr_len(dd_tokens));
-                        if (IS_ERR(lexer_next_token(state, dir_cur_token))) {
-                            return LEXING_ERROR(NONE);
-                        }
-                        if (dir_cur_token->kind == C_TOKEN_KIND_EOF) {
-                            // unimplemented();
-                            // goto out;
-                            break;
-                        } else if (dir_cur_token->kind == C_TOKEN_KIND_NEW_LINE) {
-                            break;
-                        } else if (dir_cur_token->kind == C_TOKEN_KIND_PP_DIRECTIVE) {
-                            // TODO relax that for stringify
-                            lexer_error(state, S("Nested directives are not allowed"));
-                        }
-                        dd_tokens->len += 1;
-                    }
-
-                    darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &ident);
+            if (cur_token->kind == C_TOKEN_KIND_PP_DIRECTIVE) {
+                auto dir = &cur_token->t_pp_directive;
+                if (dir->pp_dir_kind == C_PP_DIRECTIVE_DEFINE) {
+                    darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &dir->ppd_define.name);
                     if (def) {
                         // TODO %s ident
                         lexer_warn(state, S("redefinition of macro"));
@@ -1619,28 +2007,21 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
                         auto temp = *def;
                         darr_free(&temp);
                         // moved dd_tokens here
-                        *def = dd_tokens;
+                        *def = dir->ppd_define.tokens;
                     } else {
-                        LEXER_ALLOC_HANDLE(hashmap_set(&state->pp_defs, &ident, &dd_tokens));
+                        LEXER_ALLOC_HANDLE(hashmap_set(&state->pp_defs, &dir->ppd_define.name, &dir->ppd_define.tokens));
                     }
-
-
                     continue;
-                } else if (str_eq(directive_name, S("include"))) {
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_UNDEF) {
+                    darr_t *def = hashmap_get_T(darr_t, state->pp_defs, &dir->ppd_undef.name);
+                    if (def) {
+                        unimplemented();
+                        // hashmap_delete(&state->pp_defs, &dir->ppd_undef.name);
+                    }
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_INCLUDE) {
                     // unimplemented();
 
-                    C_Token hname;
-                    str_t file_path;
-                    // TRY(lex_header_name(state, &hname));
-                    TRY(lexer_next_token(state, &hname));
-                    if (hname.kind == C_TOKEN_KIND_HEADER_NAME) {
-                        file_path = hname.t_header_name.name;
-                    } else if (hname.kind == C_TOKEN_KIND_STRING) {
-                        file_path = hname.t_str_lit.str;
-                    } else {
-                        lexer_error_expected(state, S("header name"));
-                        return LEXING_ERROR(NONE);
-                    }
+                    str_t file_path = dir->ppd_include.file;
 
                     str_t include_text;
 
@@ -1674,20 +2055,9 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
                         },
                     };
 
-                } else if (str_eq(directive_name, S("ifdef"))) {
-                    auto save = lexer_save(state);
-                    str_t ident = (str_t) {};
-                    TRY(lexer_next_token(state, cur_token));
-                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
-                        ident = cur_token->t_ident.name;
-                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
-                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
-                    else {
-                        lexer_restore(state, &save);
-                        lexer_error(state, S("Unexpected token"));
-                        return LEXING_ERROR(NONE);
-                    }
-
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_IFDEF) {
+                    // auto save = lexer_save(state);
+                    str_t ident = dir->ppd_ifdef.name;
                     if (hashmap_get(state->pp_defs, &ident) != nullptr) {
                         state->pp_if_depth += 1;
                         continue;
@@ -1695,19 +2065,9 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
                         goto pp_else;
                     }
 
-                } else if (str_eq(directive_name, S("ifndef"))) {
-                    auto save = lexer_save(state);
-                    str_t ident = (str_t) {};
-                    TRY(lexer_next_token(state, cur_token));
-                    if (cur_token->kind == C_TOKEN_KIND_IDENT) {
-                        ident = cur_token->t_ident.name;
-                    } else if (cur_token->kind == C_TOKEN_KIND_KEYWORD) 
-                        ident = c_keyword_str_from_kind(cur_token->t_keyword.keyword_kind);
-                    else {
-                        lexer_restore(state, &save);
-                        lexer_error(state, S("Unexpected token"));
-                        return LEXING_ERROR(NONE);
-                    }
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_IFNDEF) {
+                    // auto save = lexer_save(state);
+                    str_t ident = dir->ppd_ifndef.name;
 
                     if (hashmap_get(state->pp_defs, &ident) == nullptr) {
                         state->pp_if_depth += 1;
@@ -1737,7 +2097,7 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
                     }
 
                     continue;
-                } else if (str_eq(directive_name, S("else"))) {
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_ELSE) {
                     if (state->pp_if_depth == 0) {
                         lexer_error(state, S("unexpected #else"));
                         return LEXING_ERROR(NONE);
@@ -1767,7 +2127,7 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
                     }
                     continue;
 
-                } else if (str_eq(directive_name, S("endif"))) {
+                } else if (dir->pp_dir_kind == C_PP_DIRECTIVE_ENDIF) {
                     if (state->pp_if_depth == 0) {
                         lexer_error(state, S("unexpected #endif"));
                         return LEXING_ERROR(NONE);
@@ -1881,7 +2241,7 @@ print_token_by_span(C_Token *token, str_t text) {
     auto fmt = string_formatter_default(&g_ctx.stdout_sw);                      \
     ASSERT_OK(token_kind_dbg_fmt(&token->kind, &fmt));
     string_formatter_write(&fmt, S(" "));
-    print(str, &s);   
+    print_pref(str, &s);   
 }
 
 
@@ -1922,14 +2282,24 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
     case C_TOKEN_KIND_KEYWORD:
         _text = c_keyword_str_from_kind(token->t_keyword.keyword_kind);
         break;
+    case C_TOKEN_KIND_PUNCT:
+        _text = c_punct_str_from_kind(token->t_punct.punct_kind);
+        break;
+    case C_TOKEN_KIND_NUMBER:
+        _text = token->t_num_lit.lit;
+        break;
+    case C_TOKEN_KIND_NEW_LINE:
+        _text = S("\\n");
+        break;
     case C_TOKEN_KIND_STRING:
         // ASSERT_OK(imm_print_fmt(S("\"%s\""), token->t_str_lit.str, &_text));
         _text = token->t_str_lit.str;
         break;
     
     default:
-        _text = str_byte_slice(*(str_t *)text, 
-            token->span.b_byte_offset, token->span.e_byte_offset);
+        // _text = str_byte_slice(*(str_t *)text, 
+        //     token->span.b_byte_offset, token->span.e_byte_offset);
+        _text = S("unimplemented");
         break;
     }
     TRY(string_formatter_write_fmt(fmt, S(
@@ -1945,11 +2315,42 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
 }
 
 
-struct_def(C_TranslationUnitData, {
-    str_t main_file;
-    hashmap_T(str_t, TU_FileData) file_data_table;
-    darr_T(C_Token) tokens;
-})
+/// @return total_token_count
+usize_t
+_c_token_list_flatten_at(darr_T(C_Token) tokens, C_Token *dst) {
+    auto prev = dst;
+    for_in_range(i, 0, darr_len(tokens)) {
+        auto tok = darr_get_T(C_Token, tokens, i);
+        if (tok->kind == C_TOKEN_KIND_EXPAND) {
+            dst += _c_token_list_flatten_at(tok->t_expand.tokens, dst);
+        } else if (tok->kind == C_TOKEN_KIND_INCLUDE) {
+            dst += _c_token_list_flatten_at(tok->t_include.tokens, dst);
+        } else if (tok->kind == C_TOKEN_KIND_EOF) {
+            continue;
+        } else {
+            *dst = *tok;
+            dst += 1;
+        }
+    }
+
+    return dst - prev;
+} 
+
+AllocatorError
+c_token_list_flatten_in(darr_T(C_Token) tokens, usize_t token_count_upper_bound, 
+    Allocator *alloc, darr_T(C_Token) *out_tokens) 
+{
+    darr_t flat;
+    TRY(darr_new_cap_in_T(C_Token, token_count_upper_bound, alloc, &flat));
+
+    auto len =_c_token_list_flatten_at(tokens, darr_get_unchecked_T(C_Token, flat, 0));
+    flat->len = len+1;
+    *darr_get_iT(C_Token, flat, -1) = *darr_get_iT(C_Token, tokens, -1);
+    
+    *out_tokens = flat;
+
+    return ALLOCATOR_ERROR(OK);
+}
 
 // void
 // c_trans_unit_tokenize(str_t main_file_path, C_TranslationUnitData *out_self) {
@@ -1981,13 +2382,7 @@ dbg_print_tokens(darr_T(C_Token) tokens, str_t text,
         // println(str, &S(""));
         // dbgp(c_token, darr_get_T(C_Token, tokens, i), &text);
     }
-    println(str, &S(""));
-}
-
-void
-c_trans_unit_dbg_print_tokens(C_TranslationUnitData *self) {
-    auto fdata = hashmap_get_T(TU_FileData, self->file_data_table, &self->main_file);
-    dbg_print_tokens(self->tokens, fdata->text, self->file_data_table);
+    println_pref(str, &S(""));
 }
 
 #endif // DBG_PRINT
