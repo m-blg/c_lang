@@ -8,7 +8,7 @@ struct Bar {
     int (*fp)();
 };
 
-void foo(Foo x) {}
+void foo1(Foo x) {}
 
 void bar(struct Bar b) {}
 

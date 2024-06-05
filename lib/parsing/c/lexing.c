@@ -169,9 +169,19 @@ struct_def(C_TokenHeaderName, {
     uchar_t brackets; // '<' or '"'
 })
 
+typedef u8_t C_TokenFlags; 
+
+typedef enum C_TokenFlag C_TokenFlag; 
+enum C_TokenFlag {
+    C_TOKEN_FLAG_EMPTY = (u8_t)0,
+    C_TOKEN_FLAG_WAS_SPACE = (u8_t)1 << 0,
+    C_TOKEN_FLAG_WAS_NEW_LINE = (u8_t)1 << 1,
+};
+
 struct_def(C_Token, {
     C_TokenKind kind;
     C_LexerSpan span;
+    C_TokenFlags flags;
     union {
         C_TokenIdent t_ident;
         C_TokenKeyword t_keyword;
@@ -188,6 +198,30 @@ struct_def(C_Token, {
 })
 
 
+// #define c_token_flag_set(token, flag) {(token)->flags = (token)->flags | ((u8_t)1 << (flag))}
+// #define c_token_flag_unset(token, flag) {(token)->flags = (token)->flags & ~((u8_t)1 << (flag))}
+
+INLINE
+void
+c_token_flags_set(C_TokenFlags *flags, C_TokenFlags set_flags) {
+    *flags |= set_flags;
+}
+INLINE
+void
+c_token_flags_unset(C_TokenFlags *flags, C_TokenFlags set_flags) {
+    *flags &= ~set_flags;
+}
+INLINE
+bool
+c_token_flags_is_set(C_TokenFlags *flags, C_TokenFlag flag) {
+    return (bool) (*flags & flag);
+}
+
+#define c_token_is_flag_set(token, flag) c_token_flags_is_set(&(token)->flags, (flag))
+#define c_token_was_space(token) c_token_is_flag_set((token), C_TOKEN_FLAG_WAS_SPACE)
+#define c_token_was_new_line(token) c_token_is_flag_set((token), C_TOKEN_FLAG_WAS_NEW_LINE)
+
+
 struct_def(LexerState, {
     str_t text;
     str_t rest; // ptr in text plus rest len
@@ -195,6 +229,7 @@ struct_def(LexerState, {
     //# meta
     usize_t line;
     usize_t col;
+    C_TokenFlags flags;
 
     // stored on procedures, like registers
     str_t file_path;
@@ -384,6 +419,8 @@ lexer_init_default(LexerState *self, str_t text, str_t file_path) {
         .rest = text,
         .line = 1,
         .col = 1,
+        .flags = C_TOKEN_FLAG_EMPTY,
+
         .file_path = file_path,
         .utf8_error_handler = lexer_utf8_error_handler_default,
         .alloc_error_handler = lexer_alloc_error_handler_default,
@@ -1194,7 +1231,7 @@ lex_number(LexerState *state, C_Token *out_token) {
 
     if ('0' <= r && r <= '9') {
         if (r == '0') {
-            r = lexer_advance_rune(state);
+            r = lexer_peek_rune(state);
             if (rune_is_number_end(r) || r == 'u' || r == 'U' || r == 'l' || r == 'L') {
                 base = 10;
                 char_set = ASCII_SET_DEC_DIGIT;
@@ -1202,9 +1239,11 @@ lex_number(LexerState *state, C_Token *out_token) {
             } else if (r == '.') {
                 unimplemented();
             } else if (r == 'x') {
+                lexer_advance_rune(state);
                 base = 16;
                 char_set = ASCII_SET_HEX_DIGIT;
             } else if (r == 'b') {
+                lexer_advance_rune(state);
                 base = 2;
                 char_set = ASCII_SET_BIN_DIGIT;
             } else if ('0' <= r && r <= '9') {
@@ -1214,7 +1253,6 @@ lex_number(LexerState *state, C_Token *out_token) {
                 }
                 base = 8;
                 char_set = ASCII_SET_OCT_DIGIT;
-                string_append_rune(string_batch, r);
             } else {
                 lexer_error(state, S("unexpected symbol"));
                 LEXING_NONE(state, &prev);
@@ -1243,9 +1281,10 @@ lex_number(LexerState *state, C_Token *out_token) {
     if (rune_is_in_ascii_set(r, char_set)) {
         LEXER_ALLOC_HANDLE(string_reserve_cap(string_batch, 64));
         while (true) {
-            r = lexer_advance_rune(state);
+            r = lexer_peek_rune(state);
             if (rune_is_in_ascii_set(r, char_set)) {
                 string_append_rune(string_batch, r);
+                lexer_advance_rune(state);
             } else {
                 break;
             }
@@ -1750,6 +1789,7 @@ LexingError
 lexer_next_token(LexerState *state, C_Token *out_token) {
     auto prev = lexer_save(state);
 
+
 retry:
     rune_t r = lexer_peek_rune(state);
     switch (r)
@@ -1786,6 +1826,7 @@ retry:
     case ' ':
     case '\t':
     case '\n':
+        c_token_flags_set(&state->flags, C_TOKEN_FLAG_WAS_SPACE);
         // skip_whitespace(state, &tokens, &out_token);
         while (true) {
             if (!rune_is_space(lexer_peek_rune(state))) {
@@ -1797,7 +1838,9 @@ retry:
                 *out_token = (C_Token) {
                     .kind = C_TOKEN_KIND_NEW_LINE,
                     .span = span_from_lexer_savepoint(state, &prev),
+                    .flags = state->flags,
                 };
+                c_token_flags_set(&state->flags, C_TOKEN_FLAG_WAS_NEW_LINE);
                 LEXING_OK(state);
             } else {
                 lexer_advance_rune(state);
@@ -1855,6 +1898,9 @@ retry:
         break;
     }
 
+    out_token->flags = state->flags;
+    // if control flow is here, then token is not a new line
+    c_token_flags_unset(&state->flags, C_TOKEN_FLAG_WAS_SPACE | C_TOKEN_FLAG_WAS_NEW_LINE);
     LEXING_OK(state);
 }
 
@@ -2305,9 +2351,11 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
     TRY(string_formatter_write_fmt(fmt, S(
         "Token:%+\n"
             "kind: %v,\n"
+            "flags: %d,\n"
             // "span: %+%v%-,\n"
             "text: %s%-"),
         fmt_obj_pref(token_kind_dbg, &token->kind),
+        (int)token->flags,
         // fmt_obj_pref(span_dbg, &token->span),
         _text
     ));

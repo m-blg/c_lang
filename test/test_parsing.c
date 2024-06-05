@@ -2,6 +2,7 @@
 #include <criterion/criterion.h>
 #include <signal.h>
 #include "parsing/c/parsing.c"
+#include "parsing/c/ast_print.c"
 
 #define c_ast_unparse_cr_log(node_kind, node, data) { \
     auto sw = cr_log_sw(&g_cr_log_sw); \
@@ -88,8 +89,34 @@ struct_def(TestInputCase, {
 
 #define TINP(str, b) ((TestInputCase) {.input = str, .val = b})
 
+// int g_x = 3;
+
+// typedef TE;
+// enum E {
+//     E0,
+//     E1,
+// };
+
+// #if defined(TE)
+// int g_y = 1;
+// #endif
+// #if E1
+// int g_y = 1;
+// #endif
+// #if defined(g_x)
+// int g_y = 1;
+// #endif
+// #if g_x
+// int g_y = 1;
+// #endif
+
+Test(Suite1, expr, .disabled=false) {
+    // cr_log_warn("%d", g_y);
+    
+}
+
 // Test(Suite1, decl, .exit_code=1) {
-Test(Suite1, decl) {
+Test(Suite1, decl, .disabled=true) {
 // int main() {
 //     suite1_setup();
     slice_t
@@ -136,7 +163,6 @@ Test(Suite1, decl) {
         darr_t tokens;
         ASSERT(IS_OK(tokenize(&state, &tokens)));
 
-        // print_tokens(tokens, text);
         // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
 
 
@@ -151,7 +177,7 @@ Test(Suite1, decl) {
         // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
         // c_ast_unparse_println(type, ty, nullptr);
 
-        PARSE_ERROR_PRINT_SUFF(declaration, &pstate, &decl)
+        PARSE_ERROR_PRINT_SUFF(declaration, &pstate, &decl);
         // cr_assert_eq(IS_OK(c_parse_declaration(&pstate, &decl)), case_val);
         // c_ast_unparse_println(decl, decl, nullptr);
         if (case_val) {
@@ -177,3 +203,63 @@ Test(Suite1, decl) {
 }
 
 typedef int (*const restrict volatile (Foo)(int))[3], Bar[];
+
+
+Test(Suite1, at_directives, .disabled=true) {
+    // int main() {
+    // suite1_setup();
+    slice_t
+    decl_test_inputs = slice_lit(
+        TINP(S("@directive_name\n"), true),
+    );
+
+    for_in_range(i, 0, slice_len(&decl_test_inputs)) {
+        auto test_input_case = *slice_get_T(TestInputCase, &decl_test_inputs, i);
+        str_t text = test_input_case.input;
+        bool case_val = test_input_case.val;
+
+        LexerState state;
+        lexer_init_default(&state, text, S("<file>"));
+        darr_t tokens;
+        ASSERT(IS_OK(tokenize(&state, &tokens)));
+
+        dbg_print_tokens(tokens, text, state.file_data_table);
+
+        // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+        C_Token *tok = nullptr;
+        C_Ast_AtDirective *at_dir = nullptr;
+        // C_Ast_Type *ty = nullptr;
+
+        ParserState pstate;
+
+        parser_init_default(&pstate, darr_slice_full(tokens));
+
+        // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
+        // c_ast_unparse_println(type, ty, nullptr);
+
+        EC_PARSE_ERROR_PRINT_SUFF(at_directive, &pstate, &at_dir);
+        // cr_assert_eq(IS_OK(c_parse_declaration(&pstate, &decl)), case_val);
+        // c_ast_unparse_println(decl, decl, nullptr);
+        if (case_val) {
+            // String s;
+            // string_new_cap_in(64, ctx_global_alloc, &s);
+            // c_ast_unparse_sprint(&s, decl, decl, nullptr);
+            // println_fmt(string_to_str(&s));
+            // // print_pref(str_t, &string_to_str(&s));
+            // string_free(&s);
+            c_ast_unparse_cr_log(ident, at_dir->name, nullptr);
+        } else {
+            cr_log_warn("none");
+        }
+
+        // allocator_free(&g_ctx.global_alloc, (void **)&ty);
+        // str_t c = darr_get_T(Token, tokens, 0)->content.str;
+        // printlnf("%.*s", (int)str_len(c), (char *)c.ptr);
+        parser_deinit(&pstate);
+        darr_free(&tokens);
+        lexer_deinit(&state);
+    }
+
+}

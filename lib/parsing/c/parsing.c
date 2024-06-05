@@ -1,3 +1,4 @@
+#pragma once
 #include "parsing/c/lexing.c"
 // #define C_AST_NODE_KINDS
 // 	C_AST_NODE_KIND(Ident, "identifier", {
@@ -14,6 +15,16 @@ struct_def(C_ParserSpan, {
 
 /// Node have dynamic size, depending on its type
 
+
+
+struct_decl(C_Ast_Ident)
+struct_decl(C_Ast_Literal)
+struct_decl(C_Ast_Expr)
+struct_decl(C_Ast_Stmt)
+struct_decl(C_Ast_Type)
+struct_decl(C_Ast_Decl)
+struct_decl(C_Ast_Node)
+
 enum_def(C_Ast_NodeKind,
     C_AST_NODE_KIND_INVALID,
     // TERMINALS
@@ -27,6 +38,10 @@ enum_def(C_Ast_NodeKind,
     C_AST_NODE_KIND_TYPE_NAME,
     C_AST_NODE_KIND_DECL,
     C_AST_NODE_KIND_TR_UNIT,
+
+#ifdef EXTENDED_C
+    C_AST_NODE_KIND_AT_DIRECTIVE,
+#endif // EXTENDED_C
     
 )
 
@@ -51,7 +66,8 @@ enum_def(C_Ast_LiteralKind,
     C_AST_LITERAL_KIND_INVALID,
     C_AST_LITERAL_KIND_STRING,
     C_AST_LITERAL_KIND_CHAR,
-    C_AST_LITERAL_KIND_NUMBER
+    C_AST_LITERAL_KIND_NUMBER,
+    C_AST_LITERAL_KIND_COMPOUND,
 ) 
 
 // // TODO
@@ -60,60 +76,118 @@ enum_def(C_Ast_LiteralKind,
 //     C_NUMBER_TYPE_INT,
 // )
 
-struct_def(C_Ast_NumberLiteral, {
+#define C_AST_NODE_LITERAL_BASE \
+    C_AST_NODE_BASE \
     C_Ast_LiteralKind lit_kind;
-    // C_NumberType num_ty;
 
-    union {
-        int value_uint;
-        int value_int;
-    };
-
-    // C_ParserSpan span;
+struct_def(C_Ast_LiteralNumber, {
+    C_AST_NODE_LITERAL_BASE
+    C_TokenNumLiteral *t_num_lit;
 })
-struct_def(C_Ast_StringLiteral, {
-    C_Ast_LiteralKind lit_kind;
-
-    str_t text;
-
-    // C_ParserSpan span;
+struct_def(C_Ast_LiteralString, {
+    C_AST_NODE_LITERAL_BASE
+    C_TokenStringLiteral *t_str_lit;
 })
-struct_def(C_Ast_CharLiteral, {
-    C_Ast_LiteralKind lit_kind;
+struct_def(C_Ast_LiteralChar, {
+    C_AST_NODE_LITERAL_BASE
+    C_TokenCharLiteral *t_char_lit;
+})
 
-    uchar_t ch;
 
-    // C_ParserSpan span;
+struct_def(C_Ast_LiteralCompoundEntry, {
+    C_Ast_Ident NLB(*)name;
+    C_Ast_Expr *value;
+})
+
+struct_def(C_Ast_LiteralCompound, {
+    C_AST_NODE_LITERAL_BASE
+    C_Ast_Type *ty;
+    darr_T(C_Ast_LiteralCompoundEntry) entries;
 })
 
 struct_def(C_Ast_Literal, {
-    C_AST_NODE_BASE
-
     union {
-        C_Ast_LiteralKind lit_kind;
-
-        C_Ast_NumberLiteral num;
-        C_Ast_StringLiteral str;
-        C_Ast_CharLiteral ch;
+    struct{
+        C_AST_NODE_LITERAL_BASE
+    };
+        C_Ast_LiteralNumber l_num;
+        C_Ast_LiteralString l_str;
+        C_Ast_LiteralChar l_char;
+        C_Ast_LiteralCompound l_compound;
     };
 })
+
+// if I'm gonna do expr interpretation, I need NodeValue
+// how do I store data associated with a type, like vtable, which can be diffrent per type
 
 enum_def(C_Ast_ExprKind, 
     C_AST_EXPR_KIND_INVALID,
     C_AST_EXPR_KIND_IDENT,
-    C_AST_EXPR_KIND_BINOP,
-    C_AST_EXPR_KIND_UNOP,
     C_AST_EXPR_KIND_LITERAL,
-    C_AST_EXPR_KIND_COMPOUND,
+    C_AST_EXPR_KIND_UNOP,
+    C_AST_EXPR_KIND_BINOP,
+    C_AST_EXPR_KIND_CONDOP,
+    C_AST_EXPR_KIND_CAST,
+    C_AST_EXPR_KIND_CALL,
+    C_AST_EXPR_KIND_COMPOUND, // expr, expr, ... expr
 )
 
+#define C_AST_NODE_EXPR_BASE \
+    C_AST_NODE_BASE \
+    C_Ast_ExprKind expr_kind; \
+    bool is_parens;
+
+// though better to put pointer to C_Ast_Ident, but it's simple so it's a small optimization
+struct_def(C_Ast_ExprIdent, {
+    C_AST_NODE_EXPR_BASE
+
+    C_Ast_Ident *ident; 
+})
+struct_def(C_Ast_ExprLit, {
+    C_AST_NODE_EXPR_BASE
+
+    C_Ast_Literal *lit; 
+})
+struct_def(C_Ast_ExprUnOp, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_OperatorKind op;
+    C_Ast_Expr *e_operand;
+})
+struct_def(C_Ast_ExprBinOp, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_OperatorKind op;
+    C_Ast_Expr *e_lhs;   
+    C_Ast_Expr *e_rhs;   
+})
+struct_def(C_Ast_ExprCondOp, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_Ast_Expr *e_cond;   
+    C_Ast_Expr *e_then;   
+    C_Ast_Expr *e_else;
+})
+
+
+struct_def(C_Ast_ExprCast, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_Ast_Type *ty;   
+    C_Ast_Expr *e_rhs;   
+})
+
 struct_def(C_Ast_Expr, {
-    C_AST_NODE_BASE // TODO: put in leafs
-
     union {
-        C_Ast_ExprKind expr_kind;
-
-        C_Ast_Literal lit;
+    struct{
+        C_AST_NODE_EXPR_BASE
+    };
+        C_Ast_ExprIdent e_ident;
+        C_Ast_ExprLit e_lit;
+        
+        C_Ast_ExprUnOp e_un_op;
+        C_Ast_ExprBinOp e_bin_op;
+        C_Ast_ExprCondOp e_cond_op;
     };
 })
 
@@ -143,28 +217,24 @@ enum_def(C_Ast_TypeKind,
 struct_decl(C_Ast_Type)
 
 struct_def(C_Ast_TypeIdent, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
-    C_Ast_TypeKind ty_kind;
-    str_t name;
+    C_Ast_Ident *ident;
 })
 struct_def(C_Ast_TypePointer, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
-    C_Ast_TypeKind ty_kind;
     C_Ast_Type *pointee;
 })
 struct_def(C_Ast_TypeArray, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
-    C_Ast_TypeKind ty_kind;
     C_Ast_Type *item;
     C_Ast_Expr *count;
 })
 struct_def(C_Ast_TypeFn, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
-    C_Ast_TypeKind ty_kind;
     C_Ast_Type *ret;
     darr_T(C_Ast_FnParam) args;
 
@@ -177,17 +247,16 @@ struct_def(C_Ast_TypeFn, {
 // })
 
 struct_def(C_Ast_TypeRecord, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
-    C_Ast_TypeKind ty_kind;
-    C_Ast_Ident *name;
+    C_Ast_Ident NLB(*)name;
     darr_T(C_Ast_Decl) fields;
 })
 typedef C_Ast_TypeRecord C_Ast_TypeStruct;
 typedef C_Ast_TypeRecord C_Ast_TypeUnion;
 
 struct_def(C_Ast_TypeEnum, {
-    C_AST_NODE_BASE
+    C_AST_NODE_TYPE_BASE
 
 })
 
@@ -222,7 +291,7 @@ struct_def(C_Ast_Declarator, {
 struct_def(C_Ast_InitDeclarator, {
     C_Ast_Type *ty;
     C_Ast_Ident *name;
-    C_Ast_Expr *initializer;
+    C_Ast_Expr NLB(*)initializer;
 })
 
 struct_def(C_Ast_FnParam, {
@@ -248,6 +317,7 @@ enum_def(C_Ast_DeclKind,
 #define C_AST_NODE_DECL_BASE \
     C_AST_NODE_BASE \
     C_Ast_DeclKind decl_kind; \
+    darr_T(C_Ast_AtDirective *) at_directives;
 
 struct_def(C_Ast_DeclType, {
     C_AST_NODE_DECL_BASE
@@ -257,20 +327,20 @@ struct_def(C_Ast_DeclVar, {
     C_AST_NODE_DECL_BASE
     C_Ast_Type *ty;
     C_Ast_Ident *name;
-    C_Ast_Expr *initializer;
-    darr_T(C_Ast_InitDeclarator) others;
+    C_Ast_Expr NLB(*)initializer;
+    NLB(darr_T(C_Ast_InitDeclarator)) others;
 })
 struct_def(C_Ast_DeclFnDef, {
     C_AST_NODE_DECL_BASE
     C_Ast_Type *ty;
     C_Ast_Ident *name;
-    C_Ast_StmtCompound *body;
+    C_Ast_StmtCompound NLB(*)body;
 })
 struct_def(C_Ast_DeclTypedef, {
     C_AST_NODE_DECL_BASE
     C_Ast_Type *ty;
     C_Ast_Ident *name;
-    darr_T(C_Ast_Declarator) others;
+    NLB(darr_T(C_Ast_Declarator)) others;
 })
 
 
@@ -302,13 +372,91 @@ struct_def(C_Ast_Decl, {
 
 enum_def(C_Ast_StmtKind, 
     C_AST_STMT_KIND_INVALID,
+    C_AST_STMT_KIND_EXPR,
+
+    C_AST_STMT_KIND_IF,
+    C_AST_STMT_KIND_SWITCH,
+
+    C_AST_STMT_KIND_FOR,
+    C_AST_STMT_KIND_WHILE,
+    C_AST_STMT_KIND_DO_WHILE,
+
+    C_AST_STMT_KIND_GOTO,
+    C_AST_STMT_KIND_CONTINUE,
+    C_AST_STMT_KIND_BREAK,
+    C_AST_STMT_KIND_RETURN,
+
     C_AST_STMT_KIND_COMPOUND
 )
 
-struct_def(C_Ast_StmtCompound, {
-    C_AST_NODE_BASE
-
+#define C_AST_NODE_STMT_BASE \
+    C_AST_NODE_BASE \
     C_Ast_StmtKind stmt_kind;
+
+struct_decl(C_Ast_Stmt)
+
+struct_def(C_Ast_StmtExpr, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_expr;
+})
+
+struct_def(C_Ast_StmtIf, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_cond;
+    C_Ast_Stmt *s_then;
+    C_Ast_Stmt NLB(*)s_else;
+})
+struct_def(C_Ast_StmtSwitch, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_item;
+    C_Ast_Stmt *s_body;
+})
+
+struct_def(C_Ast_StmtFor, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Decl NLB(*)d_vars;
+    C_Ast_Expr NLB(*)e_cond;
+    C_Ast_Expr NLB(*)e_next;
+
+    C_Ast_Stmt *s_body;
+})
+struct_def(C_Ast_StmtWhile, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_cond;
+    C_Ast_Stmt *s_body;
+})
+struct_def(C_Ast_StmtDoWhile, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Stmt *s_body;
+    C_Ast_Expr *e_cond;
+})
+
+struct_def(C_Ast_StmtGoto, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Ident *label;
+})
+struct_def(C_Ast_StmtBreak, {
+    C_AST_NODE_STMT_BASE
+})
+struct_def(C_Ast_StmtContinue, {
+    C_AST_NODE_STMT_BASE
+})
+struct_def(C_Ast_StmtReturn, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_ret;
+})
+
+struct_def(C_Ast_StmtCompound, {
+    C_AST_NODE_STMT_BASE
+
     darr_T(C_Ast_BlockItem) items;
 })
 
@@ -316,14 +464,27 @@ struct_def(C_Ast_StmtCompound, {
 struct_def(C_Ast_Stmt, {
     union {
     struct {
-        C_AST_NODE_BASE
-        C_Ast_StmtKind stmt_kind;
+        C_AST_NODE_STMT_BASE
     };
-        C_Ast_StmtCompound compound;
-        // TODO
+        C_Ast_StmtExpr s_expr;
+
+        C_Ast_StmtIf s_if;
+        C_Ast_StmtSwitch s_switch;
+
+        C_Ast_StmtFor s_for;
+        C_Ast_StmtWhile s_while;
+        C_Ast_StmtDoWhile s_do_while;
+
+        C_Ast_StmtGoto s_goto;
+        C_Ast_StmtBreak s_break;
+        C_Ast_StmtContinue s_continue;
+        C_Ast_StmtReturn s_return;
+
+        C_Ast_StmtCompound s_compound;
     };
 })
 
+/// Decl or Stmt
 struct_def(C_Ast_BlockItem, {
     union {
     struct {
@@ -342,6 +503,15 @@ struct_def(C_Ast_TranslationUnit, {
 })
 
 
+#ifdef EXTENDED_C
+struct_def(C_Ast_AtDirective, {
+    C_AST_NODE_BASE
+
+    C_Ast_Ident *name;
+    darr_T(C_Ast_Expr *) params;
+})
+#endif // EXTENDED_C
+
 struct_def(C_Ast_Node, {
     union {
     struct {
@@ -355,6 +525,9 @@ struct_def(C_Ast_Node, {
         C_Ast_Type ty;
         C_Ast_Decl decl;
         C_Ast_TranslationUnit tr_unit;
+    #ifdef EXTENDED_C
+        C_Ast_AtDirective at_directive;
+    #endif // EXTENDED_C
     };
 })
 
@@ -378,286 +551,6 @@ struct_def(C_Ast_Node, {
 //     return C_AST_NODE_KIND_LITERAL_BEGIN < node->kind &&
 //         node->kind < C_AST_NODE_KIND_LITERAL_END;
 // }
-FmtError
-c_ast_ident_unparse_fmt(C_Ast_Ident *ident, StringFormatter *fmt, void *_);
-FmtError
-c_ast_expr_unparse_fmt(C_Ast_Expr *expr, StringFormatter *fmt, void *_);
-FmtError
-c_ast_decl_unparse_fmt(C_Ast_Decl *decl, StringFormatter *fmt, void *_);
-FmtError
-c_ast_record_unparse_fmt(C_Ast_TypeRecord *record, StringFormatter *fmt, void *_);
-FmtError
-c_ast_struct_unparse_fmt(C_Ast_TypeStruct *_struct, StringFormatter *fmt, void *_);
-FmtError
-c_ast_union_unparse_fmt(C_Ast_TypeUnion *_union, StringFormatter *fmt, void *_);
-FmtError
-c_ast_type_unparse_fmt(C_Ast_Type *ty, StringFormatter *fmt, void *var_name);
-
-FmtError
-c_ast_ident_unparse_fmt(C_Ast_Ident *ident, StringFormatter *fmt, void *_) {
-    TRY(string_formatter_write(fmt, ident->name));
-    return FMT_ERROR(OK);
-}
-
-FmtError
-c_ast_expr_unparse_fmt(C_Ast_Expr *expr, StringFormatter *fmt, void *_) {
-    unimplemented();
-    return FMT_ERROR(OK);
-}
-
-
-FmtError
-c_ast_decl_unparse_fmt(C_Ast_Decl *decl, StringFormatter *fmt, void *_) {
-    // unimplemented();
-
-    switch (decl->decl_kind)
-    {
-    case C_AST_DECL_KIND_VARIABLE:
-        auto var = &decl->d_var;
-        ASSERT(var->name);
-        TRY(c_ast_type_unparse_fmt(var->ty, fmt, &var->name->name));
-        if (var->initializer) {
-            unimplemented();
-        }
-        if (var->others) {
-            TRY(string_formatter_write(fmt, S(", ")));
-            // unimplemented();
-            for_in_range(i, 0, darr_len(var->others)) {
-                auto init_decl = darr_get_T(C_Ast_InitDeclarator, var->others, i);
-                ASSERT(init_decl->name);
-                TRY(c_ast_type_unparse_fmt(init_decl->ty, fmt, &init_decl->name->name));
-                if (init_decl->initializer) {
-                    unimplemented();
-                }
-                if (i != darr_len(var->others)-1) {
-                    TRY(string_formatter_write(fmt, S(", ")));
-                }
-            }
-        }
-        TRY(string_formatter_write(fmt, S(";")));
-        break;
-    case C_AST_DECL_KIND_FN_DEF:
-        auto fn_def = &decl->d_fn_def;
-        ASSERT(fn_def->name);
-        TRY(c_ast_type_unparse_fmt(fn_def->ty, fmt, &fn_def->name->name));
-        if (fn_def->body->items) {
-            unimplemented();
-        }
-        TRY(string_formatter_write(fmt, S(" {}")));
-
-        break;
-    case C_AST_DECL_KIND_TYPE_DECL:
-        auto ty_decl = &decl->d_type;
-        TRY(c_ast_type_unparse_fmt(ty_decl->ty, fmt, nullptr));
-        TRY(string_formatter_write(fmt, S(";")));
-        break;
-    case C_AST_DECL_KIND_TYPEDEF:
-        auto tydef = &decl->d_typedef;
-        TRY(string_formatter_write(fmt, S("typedef ")));
-
-        ASSERT(tydef->name);
-        TRY(c_ast_type_unparse_fmt(tydef->ty, fmt, &tydef->name->name));
-        if (tydef->others) {
-            unimplemented();
-            for_in_range(i, 0, darr_len(tydef->others)) {
-                auto decl = darr_get_T(C_Ast_Declarator, tydef->others, i);
-                ASSERT(decl->name);
-                TRY(c_ast_type_unparse_fmt(decl->ty, fmt, &decl->name->name));
-            }
-        }
-
-        TRY(string_formatter_write(fmt, S(";")));
-        break;
-    case C_AST_DECL_KIND_EMPTY:
-        TRY(string_formatter_write(fmt, S(";")));
-        break;
-    
-    default:
-        unreacheble();
-        break;
-    }
-
-    return FMT_ERROR(OK);
-}
-FmtError
-c_ast_record_unparse_fmt(C_Ast_TypeRecord *record, StringFormatter *fmt, void *_) {
-    if (record->name) {
-        TRY(c_ast_ident_unparse_fmt(record->name, fmt, nullptr));
-    }
-    if (record->fields) {
-        TRY(string_formatter_write(fmt, S(" ")));
-        TRY(string_formatter_write_fmt(fmt, S("{\n")));
-        string_formatter_pad_inc(fmt);
-        for_in_range(i, 0, darr_len(record->fields)) {
-            TRY(c_ast_decl_unparse_fmt(darr_get_T(C_Ast_Decl, record->fields, i), fmt, nullptr));
-            TRY(string_formatter_write_fmt(fmt, S("\n")));
-        }
-        string_formatter_pad_dec(fmt);
-        TRY(string_formatter_write(fmt, S("}")));
-    }
-    return FMT_ERROR(OK);
-}
-FmtError
-c_ast_struct_unparse_fmt(C_Ast_TypeStruct *_struct, StringFormatter *fmt, void *_) {
-    TRY(string_formatter_write(fmt, S("struct ")));
-    TRY(c_ast_record_unparse_fmt((C_Ast_TypeRecord *)_struct, fmt, nullptr))
-    return FMT_ERROR(OK);
-}
-FmtError
-c_ast_union_unparse_fmt(C_Ast_TypeUnion *_union, StringFormatter *fmt, void *_) {
-    TRY(string_formatter_write(fmt, S("union ")));
-    TRY(c_ast_record_unparse_fmt((C_Ast_TypeRecord *)_union, fmt, nullptr))
-    return FMT_ERROR(OK);
-}
-
-
-// IDEA: recording format strings to later proper unparse
-
-FmtError
-c_ast_type_unparse_fmt(C_Ast_Type *ty, StringFormatter *fmt, void *var_name) {
-    String s, temp;
-    str_t temp_str;
-    C_Ast_TypeKind *prev_ty_kind = nullptr;
-    C_Ast_TypeKind type_kind_ident = C_AST_TYPE_KIND_IDENT;
-    StringFormatter temp_fmt;
-    
-    // NOTE: can customize error hander in ASSERT
-    ASSERT_OK(string_new_cap_in(64, &g_ctx.global_alloc, &s));
-    ASSERT_OK(string_new_cap_in(64, &g_ctx.global_alloc, &temp));
-    string_formatter_init_string_default(&temp_fmt, &temp);
-
-    if (var_name) {
-        string_append_str(&s, *(str_t *)var_name);
-        prev_ty_kind = &type_kind_ident;
-    }
-
-    while (true) {
-        switch (ty->ty_kind)
-        {
-        case C_AST_TYPE_KIND_IDENT:
-            if (prev_ty_kind == nullptr) {
-                string_append_str(&s, ty->ty_ident.name);
-            } else {
-                string_prepend_str(&s, S(" "));
-                string_prepend_str(&s, ty->ty_ident.name);
-            }
-            goto out;
-            break;
-        case C_AST_TYPE_KIND_POINTER:
-            string_prepend_str(&s, S("*"));
-            prev_ty_kind = &ty->ty_kind;
-            ty = ty->ty_pointer.pointee;
-            continue;
-            break;
-        case C_AST_TYPE_KIND_ARRAY:
-            if (ty->ty_array.count != nullptr) {
-                // ASSERT_OK(string_new_cap_in(64, &g_ctx.global_alloc, &temp));
-                string_reset(&temp);
-                TRY(c_ast_expr_unparse_fmt(ty->ty_array.count, &temp_fmt, nullptr));
-                temp_str = string_to_str(&temp);
-            } else {
-                temp_str = S("");
-            }
-
-            if (prev_ty_kind == nullptr || *prev_ty_kind == C_AST_TYPE_KIND_ARRAY 
-                                   || *prev_ty_kind == C_AST_TYPE_KIND_IDENT) 
-            {
-                string_append_str(&s, S("["));
-                string_append_str(&s, temp_str);
-                string_append_str(&s, S("]"));
-            } else {
-                string_prepend_str(&s, S("("));
-                // string_append_str_fmt(&s, S(")[%s]"), string_to_str(&temp));
-                string_append_str(&s, S(")["));
-                string_append_str(&s, temp_str);
-                string_append_str(&s, S("]"));
-            }
-
-            // if (ty->ty_array.count != nullptr) {
-            //     string_free(&temp);
-            // }
-            
-            prev_ty_kind = &ty->ty_kind;
-            ty = ty->ty_array.item;
-            break;
-        case C_AST_TYPE_KIND_FUNCTION:
-            if (prev_ty_kind != nullptr && *prev_ty_kind != C_AST_TYPE_KIND_IDENT) 
-            {
-                string_prepend_str(&s, S("("));
-                string_append_str(&s, S(")"));
-            }
-
-            string_append_str(&s, S("("));
-            if (ty->ty_fn.args) {
-                for_in_range(i, 0, darr_len(ty->ty_fn.args)-1) {
-                    string_reset(&temp);
-                    auto arg = darr_get_T(C_Ast_FnParam, ty->ty_fn.args, i);
-                    TRY(c_ast_type_unparse_fmt(arg->ty, &temp_fmt, &arg->name->name));
-                    string_append_str(&s, string_to_str(&temp));
-                    string_append_str(&s, S(", "));
-                }
-                {
-                    string_reset(&temp);
-                    auto arg = darr_get_iT(C_Ast_FnParam, ty->ty_fn.args, -1);
-                    TRY(c_ast_type_unparse_fmt(arg->ty, &temp_fmt, &arg->name->name));
-                    string_append_str(&s, string_to_str(&temp));
-                }
-            }
-            string_append_str(&s, S(")"));
-
-
-            prev_ty_kind = &ty->ty_kind;
-            ty = ty->ty_fn.ret;
-            break;
-        case C_AST_TYPE_KIND_STRUCT:
-            string_reset(&temp);
-            TRY(c_ast_struct_unparse_fmt(&ty->ty_struct, &temp_fmt, nullptr));
-            if (prev_ty_kind != nullptr) {
-                string_append_str(&temp, S(" "));
-                string_prepend_str(&s, string_to_str(&temp));
-            } else {
-                string_append_str(&s, string_to_str(&temp));
-            }
-            goto out;
-            break;
-        case C_AST_TYPE_KIND_UNION:
-        case C_AST_TYPE_KIND_ENUM:
-            unimplemented();
-            break;
-        // case C_AST_TYPE_KIND_POINTER:
-        //     TRY(c_ast_type_unparse_fmt(ty->pointer.pointee, *fmt, nullptr));
-        //     break;
-        
-        default:
-            unreacheble();
-            break;
-        }
-    }
-out:
-
-    TRY(string_formatter_write(fmt, string_to_str(&s)));
-    string_free(&s);
-    string_free(&temp);
-
-    return FMT_ERROR(OK);
-}
-
-
-FmtError
-c_ast_translation_unit_unparse_fmt(C_Ast_TranslationUnit *tr_unit, StringFormatter *fmt, void *_) {
-    auto decls = tr_unit->decls;
-    for_in_range(i, 0, darr_len(decls)) {
-        auto decl = *darr_get_T(C_Ast_Decl *, decls, i);
-        if (decl->decl_kind == C_AST_DECL_KIND_EMPTY) {
-            continue;
-        }
-        TRY(c_ast_decl_unparse_fmt(decl, fmt, nullptr));
-        TRY(string_formatter_write(fmt, S("\n\n")));
-    }
-
-    return FMT_ERROR(OK);
-}
-
 // FmtError
 // c_ast_node_dbg_fmt(C_Ast_Node *node, StringFormatter *fmt, void *text) {
 //     switch (node->kind)
@@ -848,11 +741,12 @@ INLINE
 void
 parser_skip_new_line(ParserState *state) {
     BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
-    while (slice_get_T(C_Token, &state->tokens, state->cur)->kind == C_TOKEN_KIND_NEW_LINE) {
+    //TODO handle comments separatelly
+    while (slice_get_T(C_Token, &state->tokens, state->cur)->kind == C_TOKEN_KIND_NEW_LINE ||
+           slice_get_T(C_Token, &state->tokens, state->cur)->kind == C_TOKEN_KIND_COMMENT) {
         state->cur += 1;
     }
 }
-
 
 INLINE
 C_Token *
@@ -860,6 +754,14 @@ parser_peek(ParserState *state) {
     BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
     return slice_get_T(C_Token, &state->tokens, state->cur);
 }
+
+#define parser_peek_punct_kind(state, _kind) \
+    (parser_peek(state)->kind == C_TOKEN_KIND_PUNCT && \
+    parser_peek(state)->t_punct.punct_kind == (_kind))
+#define parser_peek_keyword_kind(state, kind) \
+    (parser_peek(state)->kind == C_TOKEN_KIND_KEYWORD && \
+    parser_peek(state)->t_keyword.keyword_kind == (_kind))
+
 
 INLINE
 C_Token *
@@ -1011,6 +913,30 @@ parser_span_from_save(ParserState *state, ParserSavepoint *save) {
         ##args \
         });\
 }
+#define make_node_stmt(state, out_node, STMT_KIND_SUFF, args...) {\
+    PARSER_ALLOC_HANDLE(allocator_alloc_T(&state->ast_alloc, typeof(**out_node), out_node));\
+    **out_node = ((typeof(**out_node)) {\
+        .kind = C_AST_NODE_KIND_STMT, \
+        .stmt_kind = C_AST_STMT_KIND_##STMT_KIND_SUFF,\
+        ##args \
+        });\
+}
+#define make_node_expr(state, out_node, EXPR_KIND_SUFF, args...) {\
+    PARSER_ALLOC_HANDLE(allocator_alloc_T(&state->ast_alloc, typeof(**out_node), out_node));\
+    **out_node = ((typeof(**out_node)) {\
+        .kind = C_AST_NODE_KIND_EXPR, \
+        .expr_kind = C_AST_EXPR_KIND_##EXPR_KIND_SUFF,\
+        ##args \
+        });\
+}
+#define make_node_lit(state, out_node, LIT_KIND_SUFF, args...) {\
+    PARSER_ALLOC_HANDLE(allocator_alloc_T(&state->ast_alloc, typeof(**out_node), out_node));\
+    **out_node = ((typeof(**out_node)) {\
+        .kind = C_AST_NODE_KIND_LITERAL, \
+        .lit_kind = C_AST_LITERAL_KIND_##LIT_KIND_SUFF,\
+        ##args \
+        });\
+}
 
 ParsingError
 c_parse_ident(ParserState *state, C_Ast_Ident **out_ident);
@@ -1018,59 +944,34 @@ ParsingError
 c_parse_t_keyword_kind(ParserState *state, C_KeywordKind kind, C_Token **out_tok);
 ParsingError
 c_parse_t_punct_kind(ParserState *state, C_PunctKind kind, C_Token **out_tok);
+
+
+/// @param[in, out] state
+/// @param[out] decl_ty_head
+/// @param[out] decl_ty_leaf
+/// @param[out] decl_name
+ParsingError
+c_parse_declarator(ParserState *state, C_Ast_Type **decl_ty_head, C_Ast_Type **decl_ty_leaf, C_Ast_Ident **decl_name);
+/// @param[in, out] state
+/// @param[out] decl_ty_head
+/// @param[out] decl_ty_leaf
+/// @param[out] decl_name
+ParsingError
+c_parse_direct_declarator(ParserState *state, C_Ast_Type **decl_ty_head, C_Ast_Type **decl_ty_leaf, C_Ast_Ident **decl_name);
+ParsingError
+c_parse_record(ParserState *state, C_Ast_TypeKind struct_or_union_kind, C_Ast_TypeRecord **out_rec);
+ParsingError
+c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty);
 ParsingError
 c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl);
 
-// ParsingError
-// c_parse_struct(ParserState *state, C_Ast_TypeStruct **out_st, void *_) {
-//     unimplemented();
-
-
-//     TRY(c_parse_t_keyword_kind(state, C_KEYWORD_STRUCT, nullptr));
-
-//     C_Ast_TypeRecord *record;
-//     c_parse_record(state, &record, nullptr);
-//     record->ty_kind = C_AST_TYPE_KIND_STRUCT;
-//     *out_st = record;
-
-//     return PARSING_ERROR(OK);
-// }
-
-/// t_token_name
-
-INLINE
-bool
-c_parser_is_t_ident(ParserState *state) {
-    return parser_peek(state)->kind == C_TOKEN_KIND_IDENT;
-}
-
-// INLINE
 ParsingError
-c_parse_ident(ParserState *state, C_Ast_Ident **out_ident) {
-    C_Token *tok = parser_peek(state);
-    if (tok->kind != C_TOKEN_KIND_IDENT) {
-        parser_error_expected(state, S("identifier"));
-        return PARSING_ERROR(NONE);
-    }
+_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bool in_parens);
 
-    make_node(state, out_ident, IDENT, 
-            .name = tok->t_ident.name,
-            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1}
-        );
-    parser_advance(state);
-    return PARSING_ERROR(OK);
-}
+#define c_parse_decl c_parse_declaration
 
-INLINE
-void
-c_parser_make_ident(ParserState *state, C_Ast_Ident **out_ident) {
-    make_node(state, out_ident, IDENT, 
-            .name = parser_peek(state)->t_ident.name,
-            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1}
-        );
-    parser_advance(state);
-    // return PARSING_ERROR(OK);
-}
+// #define PARSER_TRY(p) if (IS_ERR(p)) { PARSING_NONE(PARSER_TRY_STATE, &PARSER_TRY_PREV) }
+
 
 INLINE
 bool
@@ -1128,25 +1029,496 @@ c_parser_cons_t_punct(ParserState *state, C_PunctKind kind) {
     return true;
 }
 
+ParsingError
+c_parse_t_new_line(ParserState *state, C_Token **out_tok) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_NEW_LINE) {
+        parser_error_expected(state, S("'\\n'"));
+        return PARSING_ERROR(NONE);
+    }
 
-/// @param[in, out] state
-/// @param[out] decl_ty_head
-/// @param[out] decl_ty_leaf
-/// @param[out] decl_name
+    *out_tok = parser_advance(state);
+    return PARSING_ERROR(OK);
+}
+
+
+INLINE
+bool
+c_parser_is_t_ident(ParserState *state) {
+    return parser_peek(state)->kind == C_TOKEN_KIND_IDENT;
+}
+
+// INLINE
 ParsingError
-c_parse_declarator(ParserState *state, C_Ast_Type **decl_ty_head, C_Ast_Type **decl_ty_leaf, C_Ast_Ident **decl_name);
-/// @param[in, out] state
-/// @param[out] decl_ty_head
-/// @param[out] decl_ty_leaf
-/// @param[out] decl_name
+c_parse_ident(ParserState *state, C_Ast_Ident **out_ident) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_IDENT) {
+        parser_error_expected(state, S("identifier"));
+        return PARSING_ERROR(NONE);
+    }
+
+    make_node(state, out_ident, IDENT, 
+            .name = tok->t_ident.name,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1}
+        );
+    parser_advance(state);
+    return PARSING_ERROR(OK);
+}
+
 ParsingError
-c_parse_direct_declarator(ParserState *state, C_Ast_Type **decl_ty_head, C_Ast_Type **decl_ty_leaf, C_Ast_Ident **decl_name);
+c_parse_lit_compound_body(ParserState *state, darr_T(C_Ast_LiteralCompoundEntry) *out_entries) {
+    darr_t entries;
+    darr_new_cap_in_T(C_Ast_LiteralCompoundEntry, 4, &state->ast_alloc, &entries);
+
+    C_Ast_Ident *name = nullptr;
+    C_Ast_Expr *value = nullptr;
+    C_Token *tok;
+
+    while (true) {
+        if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_DOT, &tok))) {
+            unimplemented();
+        } else if (
+            // TODO better introduce flags
+            // won't parse ',' due to precedence constraint
+            (_c_parse_expr(state, &value, c_operator_precedence(C_OPERATOR_COMMA), false))) {
+        } else {
+            break;
+        }
+
+        PARSER_ALLOC_HANDLE(darr_push(&entries, &(C_Ast_LiteralCompoundEntry) {
+            .name = name,
+            .value = value,
+        }));
+
+
+        if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+            break;
+        }
+    }
+    
+
+    *out_entries = entries;
+    PARSING_OK(state);
+}
+
+INLINE
+void
+c_parser_make_ident(ParserState *state, C_Ast_Ident **out_ident) {
+    make_node(state, out_ident, IDENT, 
+            .name = parser_peek(state)->t_ident.name,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1}
+        );
+    parser_advance(state);
+    // return PARSING_ERROR(OK);
+}
+
+// C grammar is ambiguous, where ident is a type name or not in the expressions
+// in typical C compiler, the table of type names is built linearly while parsing
+// here I wan't to parse all declarations first in whatever order, then build a type table
+// and then only parse function bodies
+
+// another ambiguous point is expressions like `x+++++y`, which now is lexed like `x ++ ++ + y`
+// I'd better prohibit such exprs alltogether, and require spaces between such operators
+
+// ParsingError
+// _c_parse_expr_incr_prec(ParserState *state, C_Ast_Expr **out_expr) {
+    
+// }
+
+bool
+c_token_is_type_name_beginning(C_Token *tok) {
+    unimplemented();
+}
+
+#define PARSER_TRY(p) \
+    if (IS_ERR(p)) { \
+        PARSING_NONE(state, &prev); \
+    }
+
+/// @brief parses binop if its precedence < max_precedence or precedence == max_precedence && its associativity is right-to-left
+/// @param state 
+/// @param out_binop 
+/// @param max_precedence 
+/// @return 
 ParsingError
-c_parse_record(ParserState *state, C_Ast_TypeKind struct_or_union_kind, C_Ast_TypeRecord **out_rec);
+c_parse_expr_binop_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t max_precedence) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_PUNCT) {
+        return PARSING_ERROR(NONE);
+    }
+
+    C_OperatorKind op_kind = c_punct_kind_to_binop_kind(tok->t_punct.punct_kind);
+    if (op_kind == C_OPERATOR_INVALID) {
+        return PARSING_ERROR(NONE);
+    }
+    u8_t op_prec = c_operator_precedence(op_kind);
+    if (op_prec > max_precedence) {
+        return PARSING_ERROR(NONE);
+    } else if (op_prec == max_precedence && c_operator_associativity(op_kind) != C_ASSOCIATIVITY_LEFT_TO_RIGHT) {
+        return PARSING_ERROR(NONE);
+    } 
+    parser_advance(state);
+
+    make_node_expr(state, out_binop, BINOP,
+        .op = op_kind);
+    PARSING_OK(state);
+}
+
+///
+/// x + y * z 
+///      +               |
+///    /   \             |   
+///  x       *           |
+///         / \          |
+///        y   z
+///
+///
+/// x - y - z 
+///         -
+///       /  \           |
+///     -     z          |
+///   /   \              |
+///  x     y             |
+///
+/// such trees are evaluated by DFS left to right
+
+/// prefix operators bind in the order they come
+/// precedence matter when prefix and infix/postfix operator
+/// !~++x + 3
+/// !~++(x + 3)
+/// !~(++x + 3)
+/// !(~++x + 3)
+///
+/// !~++x++
+/// !~++(x++)
+/// !~(++x)++
+/// !(~++x)++
+/// (!~++x)++
+///
+///
+
+/// to distinguish between postfix and infix operators:
+/// 1. they are symbolically disjoint sets
+/// 2. check usage, e.g. if then next token is operator also, then the current one is postfix otherwise it's infix
+
+/// the only limitation is that the operator can't be prefix, postfix and infix at the same time
+/// x++ ++x is ambiguous
+/// (x++) ++ x or x ++ (++x)
+
+/// lover precedence - binds tighter
+/// can parse op with precendence < max_precedence, or precendence == max_precedence && right-to-left associativity
 ParsingError
-c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty);
+_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bool in_parens) {
+    auto prev = parser_save(state);
+    C_Token *tok = parser_peek(state);
+    C_Ast_Expr *first = nullptr;
+
+    switch (tok->kind)
+    {
+    case C_TOKEN_KIND_PUNCT: {
+        tok = parser_advance(state);
+        if (tok->t_punct.punct_kind == C_PUNCT_LEFT_PAREN) {
+            if (c_token_is_type_name_beginning(parser_peek(state))) {
+                C_Ast_Type *ty = nullptr;
+                PARSER_TRY(c_parse_type_specifier(state, &ty));
+                PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+
+                if (parser_peek_punct_kind(state, C_PUNCT_LEFT_BRACE)) {
+                    // compound literal
+                    darr_t items = nullptr;
+                    c_parse_lit_compound_body(state, &items);
+                    C_Ast_LiteralCompound *lit;
+                    make_node_lit(state, &lit, COMPOUND, 
+                        .ty = ty,
+                        .entries = items);
+                    make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
+                        .lit = (C_Ast_Literal *)lit);
+                } else {
+                    // cast operator
+                    make_node_expr(state, (C_Ast_ExprCast **)&first, CAST);
+                }
+            } else {
+                PARSER_TRY(_c_parse_expr(state, &first, C_MAX_PRECEDENCE+1, true));
+            }
+        } else {
+            // prefix operator
+            unimplemented();
+
+        }
+        break;
+    }
+    case C_TOKEN_KIND_IDENT: {
+        C_Ast_Ident *ident;
+        c_parser_make_ident(state, &ident);
+        make_node_expr(state, (C_Ast_ExprIdent **)&first, IDENT,
+            .ident = ident);
+        break;
+    }
+    case C_TOKEN_KIND_NUMBER: {
+        C_Ast_LiteralNumber *lit;
+        make_node_lit(state, &lit, NUMBER, 
+            .t_num_lit = &tok->t_num_lit);
+        make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
+            .lit = (C_Ast_Literal *)lit);
+        break;
+    }
+    case C_TOKEN_KIND_STRING: {
+        C_Ast_LiteralString *lit;
+        make_node_lit(state, &lit, STRING, 
+            .t_str_lit = &tok->t_str_lit);
+        make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
+            .lit = (C_Ast_Literal *)lit);
+        break;
+    }
+    case C_TOKEN_KIND_CHAR: {
+        C_Ast_LiteralChar *lit;
+        make_node_lit(state, &lit, CHAR, 
+            .t_char_lit = &tok->t_char_lit);
+        make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
+            .lit = (C_Ast_Literal *)lit);
+        break;
+    }
+    
+    default: {
+        return PARSING_ERROR(NONE);
+        break;
+    }
+    }
+
+    C_Ast_Expr *left = first;
+
+    // postfix
+    // TODO
+
+    // infifx
+    // parses at max_precedence level
+    while (true) {
+        C_Ast_ExprBinOp *op;
+        if (IS_ERR(c_parse_expr_binop_prec_rb(state, &op, max_precedence))) {
+            break;
+        }
+
+        op->e_lhs = left;
+        // parse increasing precedence
+        PARSER_TRY(_c_parse_expr(state, &op->e_rhs, c_operator_precedence(op->op), false));
+        left = (C_Ast_Expr *)op;
+    }
+    *out_expr = left;
+
+    PARSING_OK(state);
+}
+
+INLINE
 ParsingError
-c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl);
+c_parse_expr(ParserState *state, C_Ast_Expr **out_expr) {
+    return _c_parse_expr(state, out_expr, C_MAX_PRECEDENCE+1, false);
+}
+
+INLINE
+ParsingError
+c_parse_stmt_expr(ParserState *state, C_Ast_StmtExpr **out_stmt_expr) {
+    auto prev = parser_save(state);
+    C_Token *tok = parser_peek(state);
+    
+    C_Ast_Expr *expr = nullptr;
+    TRY(c_parse_expr(state, &expr));
+    if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
+        PARSING_NONE(state, &prev);
+    }
+    make_node_stmt(state, (C_Ast_StmtExpr **)out_stmt_expr, EXPR, 
+        .e_expr = expr,
+        .span = parser_span_from_save(state, &prev));
+    
+    PARSING_OK(state);
+}
+
+ParsingError
+c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item);
+
+ParsingError
+c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
+
+    auto prev = parser_save(state);
+    C_Token *tok = parser_peek(state);
+
+    switch (tok->kind)
+    {
+    case C_TOKEN_KIND_CHAR:
+    case C_TOKEN_KIND_STRING:
+    case C_TOKEN_KIND_NUMBER:
+    case C_TOKEN_KIND_IDENT:
+        TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
+        break;
+    case C_TOKEN_KIND_PUNCT:
+        if (tok->t_punct.punct_kind == C_PUNCT_LEFT_BRACE) {
+            // compound statement    
+            parser_advance(state);
+            // if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok))) {
+            //     PARSING_NONE(state, &prev);
+            // }
+
+           darr_T(C_Ast_BlockItem*) items = nullptr; 
+
+            if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
+                PARSING_NONE(state, &prev);
+            }
+            
+
+            make_node_stmt(state, (C_Ast_StmtCompound **)out_stmt, COMPOUND, 
+                .items = items,
+                .span = parser_span_from_save(state, &prev));
+        } else {
+            TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
+            break;
+        }
+        break;
+
+    case C_TOKEN_KIND_KEYWORD:
+        if (!c_keyword_is_control(tok->t_keyword.keyword_kind)) {
+            TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
+            break;
+        }
+
+        tok = parser_advance(state);
+        switch (tok->t_keyword.keyword_kind)
+        {
+        case C_KEYWORD_IF:
+            C_Ast_Expr *cond = nullptr;
+            C_Ast_Stmt *then = nullptr,
+                       *_else = nullptr;
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))
+            PARSER_TRY(c_parse_expr(state, &cond));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            PARSER_TRY(c_parse_stmt(state, &then));
+            
+            if (IS_OK(c_parse_t_keyword_kind(state, C_KEYWORD_ELSE, &tok))) {
+                PARSER_TRY(c_parse_stmt(state, &_else));
+            }
+
+            make_node_stmt(state, (C_Ast_StmtIf **)out_stmt, IF, 
+                .e_cond = cond,
+                .s_then = then,
+                .s_else = _else,
+                .span = parser_span_from_save(state, &prev));
+            
+            break;
+        case C_KEYWORD_SWITCH:
+            unimplemented();
+            break;
+
+        case C_KEYWORD_FOR:
+            unimplemented();
+            break;
+        case C_KEYWORD_WHILE:
+            unimplemented();
+            break;
+        case C_KEYWORD_DO:
+            unimplemented();
+            break;
+
+        case C_KEYWORD_GOTO:
+            unimplemented();
+            break;
+        case C_KEYWORD_BREAK:
+            unimplemented();
+            break;
+        case C_KEYWORD_CONTINUE:
+            unimplemented();
+            break;
+        case C_KEYWORD_RETURN:
+            unimplemented();
+            break;
+        
+        default:
+            unreacheble();
+            break;
+        }
+        break;
+
+    case C_TOKEN_KIND_EOF:
+        PARSING_NONE(state, &prev);
+    
+    case C_TOKEN_KIND_COMMENT:
+    case C_TOKEN_KIND_NEW_LINE:
+    case C_TOKEN_KIND_PP_DIRECTIVE:
+    case C_TOKEN_KIND_INCLUDE:
+    case C_TOKEN_KIND_EXPAND:
+        unreacheble();
+        break;
+    default:
+        unreacheble();
+        break;
+    }
+
+    PARSING_OK(state);
+}
+
+ParsingError
+c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item) {
+    if (IS_OK(c_parse_decl(state, (C_Ast_Decl **)out_block_item))) {
+        PARSING_OK(state);
+    } else if (IS_OK(c_parse_stmt(state, (C_Ast_Stmt **)out_block_item))) {
+        PARSING_OK(state);
+    } else {
+        return PARSING_ERROR(NONE);
+    }
+}
+
+// ParsingError
+// c_parse_block_item2(ParserState *state, C_Ast_BlockItem **out_block_item) {
+//     auto prev = parser_save(state);
+//     C_Token *tok = parser_peek(state);
+
+//     switch (tok->kind)
+//     {
+//     case C_TOKEN_KIND_CHAR:
+//     case C_TOKEN_KIND_STRING:
+//     case C_TOKEN_KIND_NUMBER:
+//         TRY(c_parse_expr());
+//         if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
+//             PARSING_NONE(state, &prev);
+//         }
+//         break;
+
+//     case C_TOKEN_KIND_KEYWORD:
+//     case C_TOKEN_KIND_IDENT:
+//         if (IS_OK(c_parse_decl())) {
+
+//         } else if (IS_OK(c_parse_stmt())) {
+
+//         } else {
+//             PARSING_NONE(state, &prev);
+//         }
+//         break;
+//     case C_TOKEN_KIND_PUNCT:
+//         if (tok->t_punct.punct_kind == C_PUNCT_SEMI_COLON) {
+//             make_node_decl();
+//         } else {
+//             TRY(c_parse_expr());
+//             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
+//                 PARSING_NONE(state, &prev);
+//             }
+//         }
+//         break;
+
+//     case C_TOKEN_KIND_EOF:
+//         PARSING_NONE(state, &prev);
+    
+//     case C_TOKEN_KIND_COMMENT:
+//     case C_TOKEN_KIND_NEW_LINE:
+//     case C_TOKEN_KIND_PP_DIRECTIVE:
+//     case C_TOKEN_KIND_INCLUDE:
+//     case C_TOKEN_KIND_EXPAND:
+//         unreacheble();
+//         break;
+//     default:
+//         unreacheble();
+//         break;
+//     }
+
+//     PARSING_OK(state);
+// }
+
 
 
 INLINE
@@ -1486,14 +1858,20 @@ c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty) {
                 }
             }
         } else {
+            C_Ast_Ident *ident = nullptr;
+            make_node(state, &ident, IDENT, 
+                .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind));
             make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
-                .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind),
+                .ident = ident,
                 .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
             parser_advance(state);
         }
     } else if (tok->kind == C_TOKEN_KIND_IDENT) {
+        C_Ast_Ident *ident = nullptr;
+        make_node(state, &ident, IDENT, 
+            .name = tok->t_ident.name);
         make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
-            .name = tok->t_ident.name,
+            .ident = ident,
             .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
         parser_advance(state);
     } else {
@@ -1632,7 +2010,6 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         PARSING_NONE(state, &prev);
     }
 
-out:
     make_node_decl(state, (C_Ast_DeclVar **)out_decl, INVALID, 
             .decl_kind = decl_kind,
             .ty = first.ty,
@@ -1648,6 +2025,7 @@ out:
 ParsingError
 c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit) {
     auto prev = parser_save(state);
+
 
     darr_t decls;
     // works with arena reallocations
@@ -1673,16 +2051,102 @@ c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit
     return PARSING_ERROR(OK);
 }
 
-#define PARSE_ERROR_PRINT_SUFF(suff, state, args...) { \
-    if (IS_ERR(c_parse_##suff((state), ##args))) { \
-        parser_error_print(state); \
-    } \
+#ifdef EXTENDED_C
+
+ParsingError
+ec_parse_at_directive(ParserState *state, C_Ast_AtDirective **out_at_dir) {
+    auto prev = parser_save(state);
+    // unimplemented();
+
+    // decision: new new line in the parser
+    //  was_space, was_new_line flags in tokens
+    // parser_set_opts(state, C_PARSER_OPT_NO_NEW_LINE_SKIP)
+    C_Token *tok;
+    if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_AT, &tok))) {
+        PARSING_NONE(state, &prev);
+    } 
+    if (c_token_was_space(parser_peek(state))) {
+        parser_error(state, S("space after '@'"));
+        PARSING_NONE(state, &prev);
+    }
+
+    C_Ast_Ident *dir_name = nullptr;
+    if (IS_ERR(c_parse_ident(state, &dir_name))) {
+        PARSING_NONE(state, &prev);
+    }
+    if (parser_peek_punct_kind(state, C_PUNCT_LEFT_PAREN)) {
+        unimplemented();
+        // parser_set_opts(state, C_PARSER_OPT_NO_NEW_LINE_SKIP)
+    }
+    if (!c_token_was_new_line(parser_peek(state))) {
+        parser_error_expected(state, S("@ macro was not terminated with '\\n'"));
+        PARSING_NONE(state, &prev);
+    }
+
+
+    make_node(state, out_at_dir, AT_DIRECTIVE, 
+            .name = dir_name,
+            .span = parser_span_from_save(state, &prev),
+        );
+    // parser_set_opts(state, C_PARSER_OPT_NO_NEW_LINE_SKIP)
+
+    return PARSING_ERROR(OK);
 }
 
-// #define PARSE_ERROR_PRINT_SUFF2(suff, state, args...) ( \
-//     auto e = c_parse_##suff((state), ##args), \
-//     if (IS_ERR(e)) { \
-//         parser_error_print(state); \
-//     }, \
-//     e \
-// )
+ParsingError
+ec_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit) {
+    auto prev = parser_save(state);
+
+    darr_T(C_Ast_AtDirective *) cur_at_dirs;
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_AtDirective *, 4, &state->ast_alloc, &cur_at_dirs));
+
+    darr_t decls;
+    // works with arena reallocations
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Decl *, 16, &state->ast_alloc, &decls));
+
+    C_Ast_Decl *decl = nullptr;
+    C_Ast_AtDirective *dir = nullptr;
+    while (parser_peek(state)->kind != C_TOKEN_KIND_EOF) {
+        if (parser_peek_punct_kind(state, C_PUNCT_AT)) {
+            if (IS_ERR(ec_parse_at_directive(state, &dir))) {
+                PARSING_NONE(state, &prev);
+            }
+            PARSER_ALLOC_HANDLE(darr_push(&cur_at_dirs, &dir));
+            continue;
+        }
+
+        PARSER_ALLOC_HANDLE(darr_reserve_cap(&decls, 1));
+        if (IS_ERR(c_parse_declaration(state, &decl))) {
+            PARSING_NONE(state, &prev);
+        }
+
+        *darr_get_unchecked_T(C_Ast_Decl *, decls, darr_len(decls)) = decl;
+        decls->len += 1;
+        if (darr_len(cur_at_dirs) > 0) {
+            if (decl->decl_kind == C_AST_DECL_KIND_EMPTY) {
+                darr_free(&cur_at_dirs);
+                parser_error(state, S("stray @ directives"));
+                PARSING_NONE(state, &prev);
+            }
+            decl->at_directives = cur_at_dirs;
+            PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_AtDirective *, 4, &state->ast_alloc, &cur_at_dirs));
+        }
+
+        arena_free(state->ast_arena, (void **)&decl);
+    }
+
+    if (darr_len(cur_at_dirs) > 0) {
+        darr_free(&cur_at_dirs);
+        parser_error(state, S("stray @ directives"));
+        PARSING_NONE(state, &prev);
+    } 
+
+    make_node(state, out_tr_unit, TR_UNIT, 
+            .decls = decls,
+            .span = parser_span_from_save(state, &prev),
+        );
+
+    return PARSING_ERROR(OK);
+}
+
+#endif // EXTENDED_C

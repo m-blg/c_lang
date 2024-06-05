@@ -1,4 +1,7 @@
-#include "parsing/c/parsing.c"
+#pragma once
+#include "parsing/c/proc_macro.c"
+#include "parsing/c/ast_print.c"
+
 
 
 
@@ -7,6 +10,10 @@ struct_def(C_SymbolData, {
 
     darr_T(C_Symbol) deps; // symbols this symbol depends on 
     darr_T(C_Symbol) forward_deps; // symbols that depend on this one
+
+#ifdef EXTENDED_C
+    ProcMacroError (*compiled_sym)(C_Ast_Node *, C_Ast_Node **);
+#endif // EXTENDED_C
 })
 
 
@@ -19,14 +26,33 @@ struct_def(C_TranslationUnitData, {
     C_Ast_TranslationUnit *tr_unit;
 
     // analysis
-    hashmap_T(str_t, C_SymbolData) symbol_table;
-    hashmap_T(str_t, void) topsort_start_symbols;
+    C_SymbolTable symbol_table;
+    // hashmap_T(str_t, void) topsort_start_symbols;
+#ifdef EXTENDED_C
+    C_SymbolTable proc_macro_table;
+    void *proc_macro_lib; // handle from dlopen call
+#endif // EXTENDED_C
 
     // mem
     Arena string_arena;
     Arena token_arena;
     Arena ast_arena;
 })
+
+void
+c_translation_unit_init(C_TranslationUnitData *self, str_t main_file_path);
+void
+c_translation_unit_deinit(C_TranslationUnitData *self);
+bool
+c_translation_unit_lex(C_TranslationUnitData *self);
+bool
+c_translation_unit_parse(C_TranslationUnitData *self);
+void
+ec_translation_unit_ast_unparse(C_TranslationUnitData *self, StreamWriter *dst_sw);
+void
+ec_translation_unit_ast_compile_graphvis(C_TranslationUnitData *self, StreamWriter *dst_sw);
+bool
+ec_translation_unit_build_load_proc_macro_symbols(C_TranslationUnitData *self, C_BuildData *data);
 
 void
 c_translation_unit_init(C_TranslationUnitData *self, str_t main_file_path) {
@@ -110,125 +136,11 @@ c_translation_unit_parse(C_TranslationUnitData *self) {
     return true;
 }
 
-struct_def(C_PathName, {
-    str_t path;
-})
-typedef str_t C_Symbol;
-typedef hashmap_T(C_Symbol, C_SymbolData) C_SymbolTable;
-
-/// @param[in, out] deps
-void
-c_stmt_collect_symbol_deps(darr_T(C_Symbol) *deps, C_Ast_Stmt *stmt) {
-    unimplemented();
-}
-// TODO mabe on null allocation
-/// @param[in, out] deps preallocated
-void
-c_type_name_collect_symbol_deps(darr_T(C_Symbol) *deps, C_Ast_Type *ty) {
-    unimplemented();
-}
-
-void
-c_global_symbol_table_process_decl(C_SymbolTable *table, C_Ast_Decl *decl) {
-    switch (decl->decl_kind)
-    {
-    case C_AST_DECL_KIND_VARIABLE:
-        auto var = &decl->d_var;
-        ASSERT(var->name);
-
-        darr_T(C_Symbol) deps;
-        darr_new_cap_in_T(C_Symbol, 64, ctx_global_alloc, &deps);
-        c_type_name_collect_symbol_deps(&deps, var->ty);
-
-        hashmap_set(table, &var->name->name, &(C_SymbolData) {
-            .node = (C_Ast_Node *)decl,
-            .deps = deps,
-        });
-        break;
-    case C_AST_DECL_KIND_EMPTY:
-        break;
-    case C_AST_DECL_KIND_FN_DEF:
-    case C_AST_DECL_KIND_TYPE_DECL:
-
-    case C_AST_DECL_KIND_TYPEDEF:
-        unimplemented();
-        break;
-
-    default:
-        unreacheble();
-        break;
-    }
-}
 
 void
 c_translation_unit_build_global_symbol_table(C_TranslationUnitData *self) {
     
 }
-
-/// @param[in] sym_table symbol table - graph
-/// @param[in] init_syms can be null, slice of symbols with in_deg = 0
-/// @param[out] out_syms darr can be uninit
-// bool
-// c_symbols_topsort(C_SymbolTable sym_table, slice_T(C_Symbol) INLB(*)init_syms, INLB(darr_T(C_Symbol)) *out_syms) {
-
-//     if (*out_syms == nullptr) {
-//         darr_new_cap_in_T(C_Symbol, hashmap_len(sym_table), ctx_global_alloc, out_syms);
-//     }
-
-//     // each should have deps_in_deg = 0
-//     darr_T(C_Symbol) stack;
-//     ASSERT_OK(darr_new_in_T(C_Symbol, hashmap_len(sym_table), ctx_global_alloc, &stack));
-//     // push initials
-//     slice_T(usize_t) deps_in_deg;
-//     ASSERT_OK(slice_new_in_T(usize_t, hashmap_len(sym_table), ctx_global_alloc, &deps_in_deg));
-//     if (init_syms) {
-//         slice_copy_data(init_syms, darr_data(stack));
-//     } else {
-//         for_in_range(i, 0ul, hashmap_len(sym_table)) {
-//             auto bucket = hashmap_get_bucket_by_index(i);        
-//             usize_t in_deg = darr_len(hashmap_bucket_value_T(C_SymbolData, bucket)->deps);
-//             if (in_deg == 0) {
-//                 ASSERT_OK(darr_push(&stack, hashmap_bucket_key_T(C_Symbol, bucket)));
-//             }
-//         }    
-//     }
-
-
-
-//     while (darr_len(stack) > 0) {
-//         C_Symbol cur = darr_pop(&stack);
-//         usize_t *cur_in_deg = slice_get_T(usize_t, &deps_in_deg, hashmap_key_index(sym_table, &cur));
-//         ASSERT(cur_in_deg == 0);
-
-//         darr_T(C_Symbol) f_deps = *hashmap_get_T(C_SymbolData, sym_table, &cur)->forward_deps;
-//         for_in_range(i, 0ul, darr_len(f_deps)) {
-//             C_Symbol f_dep = *darr_get_T(C_Symbol, f_deps, i);
-//             usize_t *f_dep_in_deg = slice_get_T(usize_t, &deps_in_deg, hashmap_key_index(sym_table, &f_dep));
-//             ASSERT(*f_dep_in_deg > 0);
-//             *f_dep_in_deg -= 1;
-//             // f_dep_in_deg is not 0, then there is a node which f_dep depends on 
-//             //      and which(if the last one) is gonna add f_dep to the stack
-//             if (*f_dep_in_deg == 0) {
-//                 ASSERT_OK(darr_push(&stack, &f_dep));
-//             }
-//         }
-
-//         ASSERT_OK(darr_push(&out_syms, &cur));
-//     }
-
-//     if (darr_len(*out_syms) != hashmap_len(sym_table)) {
-//         // TODO
-//         return false;
-//     }
-
-//     return true;
-// }
-
-/// 
-/// 
-/// 
-/// 
-/// 
 
 bool
 c_translation_unit_ast_topsort(C_TranslationUnitData *self) {
@@ -248,9 +160,6 @@ bool
 c_translation_unit_gcc_compile(C_TranslationUnitData *self) {
     unimplemented();
 }
-
-
-
 
 void
 c_translation_unit_dbg_print_tokens(C_TranslationUnitData *self) {
@@ -342,3 +251,102 @@ _translation_unit_parser_deinit(ParserState *state) {
 
     *state = (ParserState) {};
 }
+
+
+#define EC_BUILD_DIR "build"
+#define EC_BUILD_PROC_MACRO_SRC "__proc_macros.c"
+
+#define EC_COMPILER_LIB "libecc.so"
+
+struct_def(C_BuildData, {
+    // opts
+    str_t build_path; // default EC_BUILD_DIR
+    str_t macro_src;
+    str_t compiler_lib;
+
+
+    // mem
+    Arena string_arena;
+    Arena string_alloc;
+})
+
+
+void
+ec_translation_unit_ast_unparse(C_TranslationUnitData *self, StreamWriter *dst_sw) {
+    auto fmt = string_formatter_default(dst_sw);
+    ASSERT_OK(ec_ast_translation_unit_unparse_fmt(self->tr_unit, &fmt, nullptr));
+    // ASSERT_OK(string_formatter_write(&fmt, S("\n")));
+    ASSERT_OK(string_formatter_done(&fmt));
+}
+void
+ec_translation_unit_ast_compile_graphvis(C_TranslationUnitData *self, StreamWriter *dst_sw) {
+    auto fmt = string_formatter_default(dst_sw);
+    usize_t index = 0;
+    ASSERT_OK(ec_ast_translation_unit_compile_graphvis_fmt(self->tr_unit, &fmt, &index, index));
+    // ASSERT_OK(string_formatter_write(&fmt, S("\n")));
+    ASSERT_OK(string_formatter_done(&fmt));
+}
+bool
+ec_translation_unit_parse(C_TranslationUnitData *self) {
+    ASSERT_OK(arena_init(&self->ast_arena, darr_len(self->tokens), ctx_global_alloc));
+
+    ParserState pstate;
+
+    _translation_unit_parser_init(self, &pstate);
+
+    if (IS_ERR(ec_parse_translation_unit(&pstate, &self->tr_unit))) {
+        parser_error_print(&pstate);
+        _translation_unit_parser_deinit(&pstate);
+        return false;
+    }
+
+    _translation_unit_parser_deinit(&pstate);
+    return true;
+}
+
+#include <dlfcn.h>
+
+bool
+ec_translation_unit_build_load_proc_macro_symbols(C_TranslationUnitData *self, C_BuildData *data) {
+    unimplemented();
+    String batch;
+    string_new_cap_in(1024, ctx_global_alloc, &batch);
+    // sprint_fmt(&cmd, S("gcc -fPIC -shared -g -Wall -Wextra -o %s %s\0"), c_builder_build_path(data, data->));
+    // system(string_to_str(&cmd).ptr);
+    ASSERT(self->proc_macro_table); 
+    if (hashmap_len(self->proc_macro_table) == 0) {
+        return true;
+    }
+
+    // unparse macros
+    WITH_FILE(S("build/__proc_macros.c"), "w", file, {
+        
+    })
+    system("gcc -fPIC -shared -g -Wall -Wextra -o build/libmacros.so build/__proc_macros.c -lecc");
+
+    void *lib = dlopen("build/libmacros.so", RTLD_NOW);
+    if (!lib) {
+        fprintf(stderr, "dlopen failed: %s\n", dlerror());
+        return false;
+    }
+    self->proc_macro_lib = lib;
+
+
+    bool was_err = false;
+    for_in_hashmap_key_val_T(C_Symbol, C_SymbolData, self->proc_macro_table, key, val, {
+        string_reset(&batch);
+        sprint_fmt(&batch, S("%s\0"), *key);
+        ProcMacroError (*macro)(C_Ast_Node *, C_Ast_Node **) = dlsym(lib, (char *)string_to_str(&batch).ptr);
+        if (macro == nullptr) {
+            fprintf(stderr, "dlsym for %s failed: %s\n", (char *)string_to_str(&batch).ptr, dlerror());
+            was_err = true;
+        }
+        val->compiled_sym = macro;
+    })
+    if (was_err) {
+        return false;
+    }
+
+    return true;
+}
+

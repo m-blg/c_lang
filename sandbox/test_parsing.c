@@ -41,7 +41,7 @@ test1() {
         .kind = C_AST_NODE_KIND_EXPR,
         .lit = (C_Ast_Literal) {
             .kind = C_AST_NODE_KIND_LITERAL,
-            .num = (C_Ast_NumberLiteral) {
+            .num = (C_Ast_LiteralNumber) {
                 .lit_kind = C_AST_LITERAL_KIND_NUMBER,
                 .num_ty = C_NUMBER_TYPE_INT,
                 .value_int = 16,
