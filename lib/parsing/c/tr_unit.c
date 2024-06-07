@@ -5,18 +5,6 @@
 
 
 
-struct_def(C_SymbolData, {
-    C_Ast_Node *node;
-
-    darr_T(C_Symbol) deps; // symbols this symbol depends on 
-    darr_T(C_Symbol) forward_deps; // symbols that depend on this one
-
-#ifdef EXTENDED_C
-    ProcMacroError (*compiled_sym)(C_Ast_Node *, C_Ast_Node **);
-#endif // EXTENDED_C
-})
-
-
 struct_def(C_TranslationUnitData, {
     str_t main_file;
     hashmap_T(str_t, TU_FileData) file_data_table;
@@ -51,6 +39,8 @@ void
 ec_translation_unit_ast_unparse(C_TranslationUnitData *self, StreamWriter *dst_sw);
 void
 ec_translation_unit_ast_compile_graphvis(C_TranslationUnitData *self, StreamWriter *dst_sw);
+
+struct_decl(C_BuildData)
 bool
 ec_translation_unit_build_load_proc_macro_symbols(C_TranslationUnitData *self, C_BuildData *data);
 
@@ -229,9 +219,13 @@ _translation_unit_parser_init(C_TranslationUnitData *self, ParserState *state) {
         .string_alloc = arena_allocator(&self->string_arena),
         .ast_alloc = arena_allocator(&self->ast_arena),
 
+        .collect_symbols = true,
+
         .alloc_error_handler = parser_alloc_error_handler_default,
         .error = lexer_error_print,
     };
+
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_SymbolTable *, 16, ctx_global_alloc, &state->env));
 
     // NEW(&state->ast_arena);
     // NEW(&state->string_arena);
@@ -341,7 +335,7 @@ ec_translation_unit_build_load_proc_macro_symbols(C_TranslationUnitData *self, C
             fprintf(stderr, "dlsym for %s failed: %s\n", (char *)string_to_str(&batch).ptr, dlerror());
             was_err = true;
         }
-        val->compiled_sym = macro;
+        val->macro_compiled_sym = macro;
     })
     if (was_err) {
         return false;

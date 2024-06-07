@@ -126,16 +126,27 @@ enum_def(C_Ast_ExprKind,
     C_AST_EXPR_KIND_LITERAL,
     C_AST_EXPR_KIND_UNOP,
     C_AST_EXPR_KIND_BINOP,
-    C_AST_EXPR_KIND_CONDOP,
+    C_AST_EXPR_KIND_CONDOP, // ?:
     C_AST_EXPR_KIND_CAST,
-    C_AST_EXPR_KIND_CALL,
+    C_AST_EXPR_KIND_FN_CALL,
+    C_AST_EXPR_KIND_ARRAY_SUB,
     C_AST_EXPR_KIND_COMPOUND, // expr, expr, ... expr
 )
+
+
+typedef u8_t C_ExprFlags; 
+
+enum_def(C_ExprFlag,
+    C_EXPR_FLAG_EMPTY = (u8_t)0,
+    C_EXPR_FLAG_IN_PARENS = (u8_t)1 << 0,
+    C_EXPR_FLAG_STRICT_PRECEDENCE = (u8_t)1 << 1, // used in parsing only
+    C_EXPR_FLAG_IS_PREFIX = (u8_t)1 << 2, // is unary operator prefix or postfix
+);
 
 #define C_AST_NODE_EXPR_BASE \
     C_AST_NODE_BASE \
     C_Ast_ExprKind expr_kind; \
-    bool is_parens;
+    C_ExprFlags flags; // right now only IN_PARENS is used
 
 // though better to put pointer to C_Ast_Ident, but it's simple so it's a small optimization
 struct_def(C_Ast_ExprIdent, {
@@ -169,12 +180,30 @@ struct_def(C_Ast_ExprCondOp, {
     C_Ast_Expr *e_else;
 })
 
-
 struct_def(C_Ast_ExprCast, {
     C_AST_NODE_EXPR_BASE
     
     C_Ast_Type *ty;   
     C_Ast_Expr *e_rhs;   
+})
+
+struct_def(C_Ast_ExprArraySub, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_Ast_Expr *array;
+    C_Ast_Expr NLB(*)arg;
+})
+struct_def(C_Ast_ExprFnCall, {
+    C_AST_NODE_EXPR_BASE
+    
+    C_Ast_Expr *caller;
+    NLB(darr_T(C_Ast_Expr *))args;
+})
+
+struct_def(C_Ast_ExprCompound, {
+    C_AST_NODE_EXPR_BASE
+    
+    darr_T(C_Ast_Expr *) items;
 })
 
 struct_def(C_Ast_Expr, {
@@ -188,6 +217,11 @@ struct_def(C_Ast_Expr, {
         C_Ast_ExprUnOp e_un_op;
         C_Ast_ExprBinOp e_bin_op;
         C_Ast_ExprCondOp e_cond_op;
+        C_Ast_ExprCast e_cast;
+        C_Ast_ExprFnCall e_fn_call;
+        C_Ast_ExprArraySub e_array_sub;
+
+        C_Ast_ExprCompound e_compound;
     };
 })
 
@@ -258,6 +292,8 @@ typedef C_Ast_TypeRecord C_Ast_TypeUnion;
 struct_def(C_Ast_TypeEnum, {
     C_AST_NODE_TYPE_BASE
 
+    C_Ast_Ident NLB(*)name;
+    darr_T(C_Ast_Ident *) items;
 })
 
 struct_def(C_Ast_Type, {
@@ -457,6 +493,7 @@ struct_def(C_Ast_StmtReturn, {
 struct_def(C_Ast_StmtCompound, {
     C_AST_NODE_STMT_BASE
 
+    C_SymbolTable scope;
     darr_T(C_Ast_BlockItem) items;
 })
 
@@ -621,10 +658,60 @@ struct_def(ParsingErrorData, {
     str_t s3;
 })
 
+
+enum_def(C_ParsingMode,
+    C_PARSING_MODE_LINEAR,
+    C_PARSING_MODE_POSTPONED,
+    )
+
+/// stack of scopes, each scope is a symbol table (hashmap)
+typedef darr_T(C_SymbolTable *) C_Environment;
+
+
+C_SymbolData NLB(*)
+c_environment_get_sym_data(C_Environment env, C_Symbol sym) {
+    C_SymbolData *data = nullptr;
+    for (isize_t i = (isize_t)darr_len(env) - 1; i >= 0; i -= 1) {
+        data = hashmap_get(**darr_get_T(C_SymbolTable *, env, i), &sym);
+        if (data != nullptr) {
+            break;
+        }
+    }
+
+    return data;
+}
+
+C_SymbolTable *
+c_environment_global_scope(C_Environment env) {
+    return *darr_get_T(C_SymbolTable *, env, 0);
+}
+C_SymbolTable *
+c_environment_local_scope(C_Environment env) {
+    return *darr_get_iT(C_SymbolTable *, env, -1);
+}
+
+void
+c_environment_push_scope(C_Environment *env, C_SymbolTable *scope) {
+    ASSERT_OK(darr_push(env, &scope));
+}
+void
+c_environment_pop_scope(C_Environment *env) {
+    darr_pop(env);
+}
+
 struct_def(ParserState, {
     // darr_T(C_TokenIterEntry) parse_stack;
     slice_T(C_Token) tokens;
     usize_t cur;
+
+    C_ParsingMode mode;
+    // C_SymbolTable *type_table;
+    // C_SymbolTable *enum_table;
+
+    // C_SymbolTable *global_sym_table;
+    // C_SymbolTable *local_sym_table;
+    C_Environment env;
+    bool collect_symbols;
 
     // darr_T(ParsingErrorData) error_stack;
     bool was_error;
@@ -632,7 +719,6 @@ struct_def(ParserState, {
 
     Arena *ast_arena;
     Arena *string_arena;
-
     Allocator ast_alloc;
     Allocator string_alloc;
 
@@ -711,6 +797,8 @@ parser_init_default(ParserState *state, slice_T(C_Token) tokens) {
         .tokens = tokens,
         .cur = 0,
 
+        .collect_symbols = true,
+
         .alloc_error_handler = parser_alloc_error_handler_default,
         .error = lexer_error_print,
     };
@@ -724,6 +812,8 @@ parser_init_default(ParserState *state, slice_T(C_Token) tokens) {
     state->string_alloc = arena_allocator(state->string_arena);
     state->ast_alloc = arena_allocator(state->ast_arena);
 
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_SymbolTable *, 16, ctx_global_alloc, &state->env));
+
     parser_skip_new_line(state);
 }
 
@@ -733,6 +823,8 @@ parser_deinit(ParserState *state) {
     arena_deinit(state->ast_arena);
     FREE(&state->string_arena);
     FREE(&state->ast_arena);
+
+    darr_free(&state->env);
 
     *state = (ParserState) {};
 }
@@ -966,7 +1058,7 @@ ParsingError
 c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl);
 
 ParsingError
-_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bool in_parens);
+_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_ExprFlags flags);
 
 #define c_parse_decl c_parse_declaration
 
@@ -1067,6 +1159,7 @@ c_parse_ident(ParserState *state, C_Ast_Ident **out_ident) {
 
 ParsingError
 c_parse_lit_compound_body(ParserState *state, darr_T(C_Ast_LiteralCompoundEntry) *out_entries) {
+    unimplemented();
     darr_t entries;
     darr_new_cap_in_T(C_Ast_LiteralCompoundEntry, 4, &state->ast_alloc, &entries);
 
@@ -1120,14 +1213,35 @@ c_parser_make_ident(ParserState *state, C_Ast_Ident **out_ident) {
 // another ambiguous point is expressions like `x+++++y`, which now is lexed like `x ++ ++ + y`
 // I'd better prohibit such exprs alltogether, and require spaces between such operators
 
-// ParsingError
-// _c_parse_expr_incr_prec(ParserState *state, C_Ast_Expr **out_expr) {
-    
-// }
+// C  requires scopes and name resolution with shadowing to correctly parse it
+// in extended version global scope is non-linear, but compound statements are
+// So it is parsed in 2 passes
+
 
 bool
-c_token_is_type_name_beginning(C_Token *tok) {
-    unimplemented();
+c_token_is_type_name_beginning(C_Environment env, C_Token *tok) {
+    if (tok->kind == C_TOKEN_KIND_IDENT) {
+        auto data = c_environment_get_sym_data(env, tok->t_ident.name);
+        if (data == nullptr) {
+            // TODO emit message
+            return false;
+        }
+        auto node = data->node;
+        ASSERT(node->kind == C_AST_NODE_KIND_DECL);
+        return node->decl.decl_kind == C_AST_DECL_KIND_TYPEDEF || node->decl.decl_kind == C_AST_DECL_KIND_TYPE_DECL;
+    } else if (tok->kind == C_TOKEN_KIND_KEYWORD) {
+        return c_keyword_is_type_specifier(tok->t_keyword.keyword_kind);
+        // auto data = c_environment_get_sym_data(env, c_keyword_str_from_kind(tok->t_keyword.keyword_kind));
+        // if (data == nullptr) {
+        //     return false;
+        // }
+        // auto node = data->node;
+
+        // ASSERT(node->kind == C_AST_NODE_KIND_DECL);
+        // return node->decl.decl_kind == C_AST_DECL_KIND_TYPEDEF || node->decl.decl_kind == C_AST_DECL_KIND_TYPE_DECL;
+    } else {
+        return false;
+    }
 }
 
 #define PARSER_TRY(p) \
@@ -1135,26 +1249,28 @@ c_token_is_type_name_beginning(C_Token *tok) {
         PARSING_NONE(state, &prev); \
     }
 
-/// @brief parses binop if its precedence < max_precedence or precedence == max_precedence && its associativity is right-to-left
+/// @brief parses binop if its precedence < max_precedence or 
+///   (if is_strict_precedence is false) precedence == max_precedence && its associativity is right-to-left
 /// @param state 
 /// @param out_binop 
-/// @param max_precedence 
+/// @param max_precedence specifies precedence up to which the procedure accepts binops
+/// @param strict_precedence the false value of this flag allows for case precedence == max_precedence && op.associativity == right-to-left
 /// @return 
 ParsingError
-c_parse_expr_binop_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t max_precedence) {
+c_parse_expr_op_infix_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t max_precedence, bool is_strict_precedence) {
     C_Token *tok = parser_peek(state);
     if (tok->kind != C_TOKEN_KIND_PUNCT) {
         return PARSING_ERROR(NONE);
     }
 
-    C_OperatorKind op_kind = c_punct_kind_to_binop_kind(tok->t_punct.punct_kind);
+    C_OperatorKind op_kind = c_punct_kind_to_infix_kind(tok->t_punct.punct_kind);
     if (op_kind == C_OPERATOR_INVALID) {
         return PARSING_ERROR(NONE);
     }
     u8_t op_prec = c_operator_precedence(op_kind);
     if (op_prec > max_precedence) {
         return PARSING_ERROR(NONE);
-    } else if (op_prec == max_precedence && c_operator_associativity(op_kind) != C_ASSOCIATIVITY_LEFT_TO_RIGHT) {
+    } else if (op_prec == max_precedence && (is_strict_precedence || c_operator_associativity(op_kind) != C_ASSOCIATIVITY_RIGHT_TO_LEFT)) {
         return PARSING_ERROR(NONE);
     } 
     parser_advance(state);
@@ -1163,6 +1279,91 @@ c_parse_expr_binop_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t
         .op = op_kind);
     PARSING_OK(state);
 }
+
+ParsingError
+c_parse_expr_op_prefix_prec_rb(ParserState *state, C_Ast_ExprUnOp **out_unop, u8_t max_precedence, bool is_strict_precedence) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_PUNCT) {
+        return PARSING_ERROR(NONE);
+    }
+
+    C_OperatorKind op_kind = c_punct_kind_to_prefix_kind(tok->t_punct.punct_kind);
+    if (op_kind == C_OPERATOR_INVALID) {
+        return PARSING_ERROR(NONE);
+    }
+    u8_t op_prec = c_operator_precedence(op_kind);
+    if (op_prec > max_precedence) {
+        return PARSING_ERROR(NONE);
+        // prefix operators are assumed to be right-to-left associative
+    } else if (op_prec == max_precedence && is_strict_precedence) {
+        return PARSING_ERROR(NONE);
+    } 
+    parser_advance(state);
+
+    make_node_expr(state, out_unop, UNOP,
+        .flags = C_EXPR_FLAG_IS_PREFIX,
+        .op = op_kind);
+    PARSING_OK(state);
+}
+ParsingError
+c_parse_expr_op_postfix_prec_rb(ParserState *state, C_Ast_ExprUnOp **out_unop, u8_t max_precedence) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_PUNCT) {
+        return PARSING_ERROR(NONE);
+    }
+
+    C_OperatorKind op_kind = c_punct_kind_to_postfix_kind(tok->t_punct.punct_kind);
+    if (op_kind == C_OPERATOR_INVALID) {
+        return PARSING_ERROR(NONE);
+    }
+    u8_t op_prec = c_operator_precedence(op_kind);
+    // postfix operators are assumed to be left-to-right associative
+    if (op_prec >= max_precedence) {
+        return PARSING_ERROR(NONE);
+    } 
+    parser_advance(state);
+
+    make_node_expr(state, out_unop, UNOP,
+        .flags = C_EXPR_FLAG_EMPTY,
+        .op = op_kind);
+    PARSING_OK(state);
+}
+ParsingError
+c_parse_expr_op_tern_cond_prec_rb(ParserState *state, C_Ast_ExprCondOp **out_tern, u8_t max_precedence, bool is_strict_precedence) {
+    C_Token *tok = parser_peek(state);
+    if (tok->kind != C_TOKEN_KIND_PUNCT) {
+        return PARSING_ERROR(NONE);
+    }
+    if (tok->t_punct.punct_kind != C_PUNCT_QUESTION) {
+        return PARSING_ERROR(NONE);
+    }
+
+    C_OperatorKind op_kind = C_OPERATOR_TERN_COND;
+    if (op_kind == C_OPERATOR_INVALID) {
+        return PARSING_ERROR(NONE);
+    }
+    u8_t op_prec = c_operator_precedence(op_kind);
+    if (op_prec > max_precedence) {
+        return PARSING_ERROR(NONE);
+        // '?:' operator is assumed to be right-to-left associative
+    } else if (op_prec == max_precedence && is_strict_precedence) {
+        return PARSING_ERROR(NONE);
+    } 
+    parser_advance(state);
+
+    make_node_expr(state, out_tern, CONDOP);
+    PARSING_OK(state);
+}
+
+INLINE
+ParsingError
+c_parse_expr_assign(ParserState *state, C_Ast_Expr **out_expr);
+INLINE
+ParsingError
+c_parse_expr_cond(ParserState *state, C_Ast_Expr **out_expr);
+#define c_parse_expr_constant c_parse_expr_cond
+ParsingError
+c_parse_expr(ParserState *state, C_Ast_Expr **out_expr);
 
 ///
 /// x + y * z 
@@ -1181,7 +1382,7 @@ c_parse_expr_binop_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t
 ///  x     y             |
 ///
 /// such trees are evaluated by DFS left to right
-
+///
 /// prefix operators bind in the order they come
 /// precedence matter when prefix and infix/postfix operator
 /// !~++x + 3
@@ -1196,19 +1397,19 @@ c_parse_expr_binop_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t
 /// (!~++x)++
 ///
 ///
-
+///
 /// to distinguish between postfix and infix operators:
 /// 1. they are symbolically disjoint sets
 /// 2. check usage, e.g. if then next token is operator also, then the current one is postfix otherwise it's infix
-
+///
 /// the only limitation is that the operator can't be prefix, postfix and infix at the same time
 /// x++ ++x is ambiguous
 /// (x++) ++ x or x ++ (++x)
-
+///
 /// lover precedence - binds tighter
 /// can parse op with precendence < max_precedence, or precendence == max_precedence && right-to-left associativity
 ParsingError
-_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bool in_parens) {
+_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_ExprFlags flags) {
     auto prev = parser_save(state);
     C_Token *tok = parser_peek(state);
     C_Ast_Expr *first = nullptr;
@@ -1216,9 +1417,9 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bo
     switch (tok->kind)
     {
     case C_TOKEN_KIND_PUNCT: {
-        tok = parser_advance(state);
         if (tok->t_punct.punct_kind == C_PUNCT_LEFT_PAREN) {
-            if (c_token_is_type_name_beginning(parser_peek(state))) {
+            parser_advance(state);
+            if (c_token_is_type_name_beginning(state->env, parser_peek(state))) {
                 C_Ast_Type *ty = nullptr;
                 PARSER_TRY(c_parse_type_specifier(state, &ty));
                 PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
@@ -1234,75 +1435,171 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bo
                     make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
                         .lit = (C_Ast_Literal *)lit);
                 } else {
+                    unimplemented();
                     // cast operator
                     make_node_expr(state, (C_Ast_ExprCast **)&first, CAST);
                 }
             } else {
-                PARSER_TRY(_c_parse_expr(state, &first, C_MAX_PRECEDENCE+1, true));
+                // parenthesized expression
+                PARSER_TRY(_c_parse_expr(state, &first, C_MAX_PRECEDENCE, C_EXPR_FLAG_STRICT_PRECEDENCE | C_EXPR_FLAG_IN_PARENS));
+                PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
             }
         } else {
             // prefix operator
-            unimplemented();
+            C_Ast_ExprUnOp *op;
+            if (IS_ERR(c_parse_expr_op_prefix_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE)))) {
+                parser_error_expected(state, S("expression"));
+                return PARSING_ERROR(NONE);
+            }
 
+            // parse increasing precedence
+            PARSER_TRY(_c_parse_expr(state, &op->e_operand, c_operator_precedence(op->op), C_EXPR_FLAG_EMPTY));
+            first = (C_Ast_Expr *)op;
         }
         break;
     }
     case C_TOKEN_KIND_IDENT: {
         C_Ast_Ident *ident;
-        c_parser_make_ident(state, &ident);
+        ASSERT_OK(c_parse_ident(state, &ident));
         make_node_expr(state, (C_Ast_ExprIdent **)&first, IDENT,
-            .ident = ident);
+            .ident = ident,
+            .span = parser_span_from_save(state, &prev));
+
         break;
     }
     case C_TOKEN_KIND_NUMBER: {
         C_Ast_LiteralNumber *lit;
         make_node_lit(state, &lit, NUMBER, 
-            .t_num_lit = &tok->t_num_lit);
+            .t_num_lit = &tok->t_num_lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
         make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
-            .lit = (C_Ast_Literal *)lit);
+            .lit = (C_Ast_Literal *)lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+
+        parser_advance(state);
         break;
     }
     case C_TOKEN_KIND_STRING: {
         C_Ast_LiteralString *lit;
         make_node_lit(state, &lit, STRING, 
-            .t_str_lit = &tok->t_str_lit);
+            .t_str_lit = &tok->t_str_lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
         make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
-            .lit = (C_Ast_Literal *)lit);
+            .lit = (C_Ast_Literal *)lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+
+        parser_advance(state);
         break;
     }
     case C_TOKEN_KIND_CHAR: {
         C_Ast_LiteralChar *lit;
         make_node_lit(state, &lit, CHAR, 
-            .t_char_lit = &tok->t_char_lit);
+            .t_char_lit = &tok->t_char_lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
         make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
-            .lit = (C_Ast_Literal *)lit);
+            .lit = (C_Ast_Literal *)lit,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+
+        parser_advance(state);
         break;
     }
-    
-    default: {
+    case C_TOKEN_KIND_KEYWORD: {
+        unimplemented();
+        break;
+    }
+    case C_TOKEN_KIND_EOF: {
+        parser_error_expected(state, S("expression"));
         return PARSING_ERROR(NONE);
-        break;
     }
+
+    
+    default: 
+        unreacheble();
+        break;
     }
 
     C_Ast_Expr *left = first;
 
-    // postfix
-    // TODO
 
-    // infifx
+
+    // postfix
+    while (true) {
+        auto prev = parser_save(state);
+        C_Ast_ExprUnOp *op = nullptr;
+        if (IS_ERR(c_parse_expr_op_postfix_prec_rb(state, &op, max_precedence))) {
+            break;
+        }
+
+        if (op->op == C_OPERATOR_FN_CALL) {
+            allocator_free(&state->ast_alloc, (void **)&op);
+            C_Ast_ExprFnCall *op = nullptr;
+            C_Ast_Expr *arg = nullptr;
+            darr_T(C_Ast_Expr *) args = nullptr;
+
+            if (IS_OK(c_parse_expr_assign(state, &arg))) {
+                PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Expr *, 4, &state->ast_alloc, &args));
+                PARSER_ALLOC_HANDLE(darr_push(&args, &arg));
+                while (true) {
+                    if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+                        break;
+                    }
+                    PARSER_TRY(c_parse_expr_assign(state, &arg));
+                    PARSER_ALLOC_HANDLE(darr_push(&args, &arg));
+                }
+            }
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            make_node_expr(state, (C_Ast_ExprFnCall **)&op, FN_CALL,
+                .caller = first,
+                .args = args,
+                .span = parser_span_from_save(state, &prev));
+            left = (C_Ast_Expr *)op;
+        } else if (op->op == C_OPERATOR_ARRAY_SUB) {
+            allocator_free(&state->ast_alloc, (void **)&op);
+            C_Ast_ExprArraySub *op = nullptr;
+            C_Ast_Expr *arg = nullptr;
+
+            c_parse_expr(state, &arg);
+
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACKET, &tok));
+            make_node_expr(state, (C_Ast_ExprArraySub **)&op, ARRAY_SUB,
+                .array = first,
+                .arg = arg,
+                .span = parser_span_from_save(state, &prev));
+            left = (C_Ast_Expr *)op;
+        } else {
+            op->e_operand = left;
+            left = (C_Ast_Expr *)op;
+        }
+    }
+
+    // infix
     // parses at max_precedence level
     while (true) {
         C_Ast_ExprBinOp *op;
-        if (IS_ERR(c_parse_expr_binop_prec_rb(state, &op, max_precedence))) {
+        if (IS_ERR(c_parse_expr_op_infix_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE)))) {
             break;
         }
 
         op->e_lhs = left;
         // parse increasing precedence
-        PARSER_TRY(_c_parse_expr(state, &op->e_rhs, c_operator_precedence(op->op), false));
+        PARSER_TRY(_c_parse_expr(state, &op->e_rhs, c_operator_precedence(op->op), C_EXPR_FLAG_EMPTY));
         left = (C_Ast_Expr *)op;
     }
+
+    // ternary condition operator
+    {
+        C_Ast_ExprCondOp *op = nullptr;
+        if (IS_OK(c_parse_expr_op_tern_cond_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE)))) {
+            op->e_cond = left;
+            PARSER_TRY(c_parse_expr(state, &op->e_then));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_COLON, &tok));
+            PARSER_TRY(c_parse_expr_cond(state, &op->e_else));
+            left = (C_Ast_Expr *)op;
+        }
+    }
+
+
+    bitfield_set_flags(&left->flags, bitfield_mask(&flags, C_EXPR_FLAG_IN_PARENS));
     *out_expr = left;
 
     PARSING_OK(state);
@@ -1310,8 +1607,43 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, bo
 
 INLINE
 ParsingError
+c_parse_expr_assign(ParserState *state, C_Ast_Expr **out_expr) {
+    return _c_parse_expr(state, out_expr, c_operator_precedence(C_OPERATOR_ASSIGN)+1, C_EXPR_FLAG_STRICT_PRECEDENCE);
+}
+INLINE
+ParsingError
+c_parse_expr_cond(ParserState *state, C_Ast_Expr **out_expr) {
+    return _c_parse_expr(state, out_expr, c_operator_precedence(C_OPERATOR_TERN_COND)+1, C_EXPR_FLAG_STRICT_PRECEDENCE);
+}
+
+ParsingError
 c_parse_expr(ParserState *state, C_Ast_Expr **out_expr) {
-    return _c_parse_expr(state, out_expr, C_MAX_PRECEDENCE+1, false);
+    C_Token *tok = nullptr;
+    C_Ast_Expr *expr = nullptr; 
+    auto prev = parser_save(state);
+
+    // won't parse ',' due to strict precedence flag
+    TRY(_c_parse_expr(state, &expr, C_MAX_PRECEDENCE, C_EXPR_FLAG_STRICT_PRECEDENCE));
+    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+        darr_T(C_Ast_Expr *) items; 
+        PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Expr *, 4, &state->ast_alloc, &items));
+        PARSER_ALLOC_HANDLE(darr_push(&items, &expr));
+
+        while (true) {
+            PARSER_TRY(_c_parse_expr(state, &expr, C_MAX_PRECEDENCE, C_EXPR_FLAG_STRICT_PRECEDENCE));
+            PARSER_ALLOC_HANDLE(darr_push(&items, &expr));
+            if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+                break;
+            }
+        }
+
+        make_node_expr(state, (C_Ast_ExprCompound **)out_expr, COMPOUND,
+            .items = items);
+    } else {
+        *out_expr = expr;
+    }
+
+    PARSING_OK(state);
 }
 
 INLINE
@@ -1334,6 +1666,8 @@ c_parse_stmt_expr(ParserState *state, C_Ast_StmtExpr **out_stmt_expr) {
 
 ParsingError
 c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item);
+ParsingError
+c_parse_block(ParserState *state, C_SymbolTable *scope, darr_T(C_Ast_BlockItem *) *out_items);
 
 ParsingError
 c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
@@ -1358,6 +1692,9 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
             // }
 
            darr_T(C_Ast_BlockItem*) items = nullptr; 
+           C_SymbolTable scope = nullptr;
+           c_parse_block(state, &scope, &items);
+
 
             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
                 PARSING_NONE(state, &prev);
@@ -1366,6 +1703,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
 
             make_node_stmt(state, (C_Ast_StmtCompound **)out_stmt, COMPOUND, 
                 .items = items,
+                .scope = scope,
                 .span = parser_span_from_save(state, &prev));
         } else {
             TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
@@ -1382,7 +1720,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
         tok = parser_advance(state);
         switch (tok->t_keyword.keyword_kind)
         {
-        case C_KEYWORD_IF:
+        case C_KEYWORD_IF: {
             C_Ast_Expr *cond = nullptr;
             C_Ast_Stmt *then = nullptr,
                        *_else = nullptr;
@@ -1402,6 +1740,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
                 .span = parser_span_from_save(state, &prev));
             
             break;
+        }
         case C_KEYWORD_SWITCH:
             unimplemented();
             break;
@@ -1430,7 +1769,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
             break;
         
         default:
-            unreacheble();
+            TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
             break;
         }
         break;
@@ -1462,6 +1801,138 @@ c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item) {
     } else {
         return PARSING_ERROR(NONE);
     }
+}
+
+void
+c_scope_collect_symbols_decl(C_SymbolTable *scope, C_Ast_Decl *decl) {
+    switch (decl->decl_kind)
+    {
+    case C_AST_DECL_KIND_TYPEDEF: {
+        ASSERT_OK(hashmap_set(scope, &decl->d_typedef.name->name, 
+            &(C_SymbolData) {
+                .node = (C_Ast_Node *)decl,
+            }));
+        
+        if (decl->d_typedef.others) {
+            for_in_range(i, 0, darr_len(decl->d_typedef.others)) {
+                auto name = darr_get_T(str_t, decl->d_typedef.others, i);
+                ASSERT_OK(hashmap_set(scope, name, 
+                    &(C_SymbolData) {
+                        .node = (C_Ast_Node *)decl,
+                    }));
+            }
+        }
+        break;
+    }
+    case C_AST_DECL_KIND_TYPE_DECL: {
+        auto ty = decl->d_type.ty;
+        switch (ty->ty_kind)
+        {
+        case C_AST_TYPE_KIND_STRUCT:
+            if (ty->ty_struct.name) {
+                ASSERT_OK(hashmap_set(scope, &ty->ty_struct.name, 
+                    &(C_SymbolData) {
+                        .node = (C_Ast_Node *)decl,
+                    }));
+            }
+            break;
+        case C_AST_TYPE_KIND_UNION:
+            if (ty->ty_union.name) {
+                ASSERT_OK(hashmap_set(scope, &ty->ty_union.name, 
+                    &(C_SymbolData) {
+                        .node = (C_Ast_Node *)decl,
+                    }));
+            }
+            break;
+        case C_AST_TYPE_KIND_ENUM:
+            if (ty->ty_enum.name) {
+                ASSERT_OK(hashmap_set(scope, &ty->ty_enum.name, 
+                    &(C_SymbolData) {
+                        .node = (C_Ast_Node *)decl,
+                    }));
+            }
+            break;
+        
+        default:
+            goto out;
+        }
+        ASSERT_OK(hashmap_set(scope, &decl->d_type.ty,
+            &(C_SymbolData) {
+                .node = (C_Ast_Node *)decl,
+            }));
+        break;
+    }
+    case C_AST_DECL_KIND_VARIABLE: {
+        ASSERT_OK(hashmap_set(scope, &decl->d_var.name->name, 
+            &(C_SymbolData) {
+                .node = (C_Ast_Node *)decl,
+            }));
+        
+        if (decl->d_var.others) {
+            for_in_range(i, 0, darr_len(decl->d_var.others)) {
+                auto name = darr_get_T(str_t, decl->d_var.others, i);
+                ASSERT_OK(hashmap_set(scope, name, 
+                    &(C_SymbolData) {
+                        .node = (C_Ast_Node *)decl,
+                    }));
+            }
+        }
+        break;
+    }
+    case C_AST_DECL_KIND_FN_DEF: {
+        ASSERT_OK(hashmap_set(scope, &decl->d_fn_def.name->name, 
+            &(C_SymbolData) {
+                .node = (C_Ast_Node *)decl,
+            }));
+    }
+    
+    default:
+        break;
+    }
+out:
+}
+
+ParsingError
+c_parse_block(ParserState *state, C_SymbolTable *scope, darr_T(C_Ast_BlockItem *) *out_items) {
+    auto prev = parser_save(state);
+    if (*scope == nullptr) {
+        PARSER_ALLOC_HANDLE(hashmap_new_cap_in_T(C_Symbol, C_SymbolData, 8, &state->ast_alloc, scope));
+    }
+    darr_t items = nullptr;
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_BlockItem *, 8, &state->ast_alloc, &items));
+    
+    c_environment_push_scope(&state->env, scope);
+
+    while (true) {
+        if (parser_peek_punct_kind(state, C_PUNCT_RIGHT_BRACE)) {
+            break;
+        }
+        {
+            C_Ast_Decl *block_item = nullptr;
+            if (IS_OK(c_parse_decl(state, &block_item))) {
+                PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
+                if (state->collect_symbols) {
+                    c_scope_collect_symbols_decl(scope, block_item);
+                }
+                continue;
+            }
+        }
+
+        {
+            C_Ast_Stmt *block_item = nullptr;
+            if (IS_OK(c_parse_stmt(state, &block_item))) {
+                PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
+                continue;
+            }
+        }
+
+        PARSING_NONE(state, &prev);
+    }
+
+    c_environment_pop_scope(&state->env);
+    *out_items = items;
+
+    PARSING_OK(state);
 }
 
 // ParsingError
@@ -1677,11 +2148,13 @@ c_parse_direct_declarator(ParserState *state,
             }
                 
             C_Ast_Expr *expr = nullptr;
-            if (parser_peek(state)->kind != C_TOKEN_KIND_PUNCT || 
-                parser_peek(state)->t_punct.punct_kind != C_PUNCT_RIGHT_BRACKET) 
-            {
-                unimplemented();
-            }
+            // if (parser_peek(state)->kind != C_TOKEN_KIND_PUNCT || 
+            //     parser_peek(state)->t_punct.punct_kind != C_PUNCT_RIGHT_BRACKET) 
+            // {
+            //     unimplemented();
+            // }
+            c_parse_expr_assign(state, &expr);
+
             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACKET, &tok))) {
                 PARSING_NONE(state, &prev);
             }
@@ -1858,18 +2331,27 @@ c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty) {
                 }
             }
         } else {
-            C_Ast_Ident *ident = nullptr;
-            make_node(state, &ident, IDENT, 
-                .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind));
-            make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
-                .ident = ident,
-                .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
-            parser_advance(state);
+            parser_error_expected(state, S("type-name"));
+            PARSING_NONE(state, &prev);
+            // C_Ast_Ident *ident = nullptr;
+            // make_node(state, &ident, IDENT, 
+            //     .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind),
+            //     .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+            // make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
+            //     .ident = ident,
+            //     .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+            // parser_advance(state);
         }
     } else if (tok->kind == C_TOKEN_KIND_IDENT) {
+        if (!c_token_is_type_name_beginning(state->env, tok)) {
+            parser_error_expected(state, S("type-name"));
+            PARSING_NONE(state, &prev);
+        }
+
         C_Ast_Ident *ident = nullptr;
         make_node(state, &ident, IDENT, 
-            .name = tok->t_ident.name);
+            .name = tok->t_ident.name,
+            .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
         make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
             .ident = ident,
             .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
@@ -1934,23 +2416,37 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         decl_ty = ty;
     }
 
-    C_Ast_Node *initializer = nullptr;
+    C_Ast_Expr *initializer = nullptr;
+
+    auto save_br = parser_save(state);
     if (decl_ty->ty_kind == C_AST_TYPE_KIND_FUNCTION && 
         IS_OK(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok))) 
     {
 
         C_Ast_StmtCompound *body = nullptr;
-        make_node(state, &body, STMT); // TEMP, TODO
 
-        if (parser_peek(state)->kind != C_TOKEN_KIND_PUNCT || 
-            parser_peek(state)->t_punct.punct_kind != C_PUNCT_RIGHT_BRACE) 
-        {
-            unimplemented();
-            initializer = (C_Ast_Node *)body;
-        }
+        darr_T(C_Ast_BlockItem*) items = nullptr; 
+        C_SymbolTable scope = nullptr;
+        c_parse_block(state, &scope, &items);
+
         if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
             PARSING_NONE(state, &prev);
         }
+        
+
+        make_node_stmt(state, (C_Ast_StmtCompound **)&body, COMPOUND, 
+            .items = items,
+            .scope = scope,
+            .span = parser_span_from_save(state, &save_br));
+
+        // if (parser_peek(state)->kind != C_TOKEN_KIND_PUNCT || 
+        //     parser_peek(state)->t_punct.punct_kind != C_PUNCT_RIGHT_BRACE) 
+        // {
+        //     unimplemented();
+        // }
+        // if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
+        //     PARSING_NONE(state, &prev);
+        // }
 
         make_node_decl(state, (C_Ast_DeclFnDef **)out_decl, FN_DEF, 
                 .ty = decl_ty,
@@ -1962,8 +2458,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         PARSING_OK(state);
 
     } else if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok))) {
-        unimplemented(); // TODO
-        // c_parse_initializer(state, );
+        PARSER_TRY(c_parse_expr_assign(state, &initializer));
     }
 
     first = (C_Ast_InitDeclarator) {
@@ -1975,6 +2470,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
     if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
         darr_new_cap_in_T(C_Ast_InitDeclarator, 3, &state->ast_alloc, &others);
         while (true) {
+            C_Ast_Expr *initializer = nullptr;
             // init-declarator
             if (IS_ERR(c_parse_declarator(state, &decl_ty, &decl_ty_leaf, &decl_name))) {
                 parser_error(state, S("Expected type-specifier"));
@@ -1983,8 +2479,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
             }
 
             if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok))) {
-                unimplemented(); // TODO
-                // c_parse_initializer(state, );
+                PARSER_TRY(c_parse_expr_assign(state, &initializer));
             }
 
             if (decl_ty) {
@@ -1995,6 +2490,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
             darr_push(&others, &(C_Ast_InitDeclarator) {
                 .ty = decl_ty,
                 .name = decl_name,
+                .initializer = initializer,
             });
 
             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
@@ -2003,7 +2499,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         }
     }
     if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
-        parser_error(state, S("Expected ';'"));
+        // parser_error(state, S("Expected ';'"));
         if (others) {
             darr_free(&others);
         }
@@ -2022,6 +2518,40 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
     PARSING_OK(state);
 }
 
+
+// void
+// c_scope_populate_builtins(C_SymbolTable *scope, Allocator *ast_alloc) {
+//     for_in_range(i, 0, slice_len(&g_builtin_types)) {
+//         auto name = slice_get_T(str_t, &g_builtin_types, i);
+
+//         C_Ast_Ident *ident = nullptr;
+//         C_Ast_Type *ty = nullptr;
+//         C_Ast_Decl *decl = nullptr;
+//         PARSER_ALLOC_HANDLE(allocator_alloc_T(ast_alloc, typeof(*ident), &ident));
+//         *ty = (C_Ast_Ident) {
+//             .kind = C_AST_NODE_KIND_IDENT, 
+//             .name = name,
+//         };
+//         PARSER_ALLOC_HANDLE(allocator_alloc_T(ast_alloc, typeof(*ty), &ty));
+//         *ty = (C_Ast_Type) {
+//             .kind = C_AST_NODE_KIND_TYPE_NAME, 
+//             .ty_kind = C_AST_TYPE_KIND_IDENT,
+//             .ident = ident,    
+//         };
+//         PARSER_ALLOC_HANDLE(allocator_alloc_T(ast_alloc, typeof(*node), &decl));
+//         *decl = (C_Ast_Decl) {
+//             .kind = C_AST_NODE_KIND_DECL, 
+//             .decl_kind = C_AST_DECL_KIND_TYPE_DECL,
+//             .ty = ty,    
+//         };
+
+//         ASSERT_OK(hashmap_set(scope, name, 
+//             &(C_SymbolData) {
+//                 .node = (C_Ast_Node *)decl,
+//             }));
+//     }
+// }
+
 ParsingError
 c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit) {
     auto prev = parser_save(state);
@@ -2031,17 +2561,28 @@ c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit
     // works with arena reallocations
     PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Decl *, 16, &state->ast_alloc, &decls));
 
+    C_SymbolTable global_scope;
+    PARSER_ALLOC_HANDLE(hashmap_new_cap_in_T(C_Symbol, C_SymbolData, 8, &state->ast_alloc, &global_scope));
+    c_environment_push_scope(&state->env, &global_scope);
+
+    // c_scope_populate_builtins(&global_scope);
+
     C_Ast_Decl *decl;
     while (parser_peek(state)->kind != C_TOKEN_KIND_EOF) {
         PARSER_ALLOC_HANDLE(darr_reserve_cap(&decls, 1));
         if (IS_ERR(c_parse_declaration(state, &decl))) {
             PARSING_NONE(state, &prev);
         }
+        if (state->collect_symbols) {
+            c_scope_collect_symbols_decl(&global_scope, decl);
+        }
 
         *darr_get_unchecked_T(C_Ast_Decl *, decls, darr_len(decls)) = decl;
         decls->len += 1;
         arena_free(state->ast_arena, (void **)&decl);
     }
+
+    c_environment_pop_scope(&state->env);
 
     make_node(state, out_tr_unit, TR_UNIT, 
             .decls = decls,

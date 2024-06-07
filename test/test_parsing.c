@@ -4,22 +4,22 @@
 #include "parsing/c/parsing.c"
 #include "parsing/c/ast_print.c"
 
-#define c_ast_unparse_cr_log(node_kind, node, data) { \
+#define c_ast_unparse_cr_log(node_kind, node, args...) { \
     auto sw = cr_log_sw(&g_cr_log_sw); \
     auto fmt = string_formatter_default(&sw); \
-    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, data)); \
+    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, ##args)); \
     ASSERT_OK(string_formatter_write(&fmt, S("\n"))); \
     ASSERT_OK(string_formatter_done(&fmt)); \
 }
-#define c_ast_unparse_println(node_kind, node, data) { \
+#define c_ast_unparse_println(node_kind, node, args...) { \
     auto fmt = string_formatter_default(&g_ctx.stdout_sw); \
-    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, data)); \
+    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, ##args)); \
     ASSERT_OK(string_formatter_write(&fmt, S("\n"))); \
     ASSERT_OK(string_formatter_done(&fmt)); \
 }
-#define c_ast_unparse_sprint(s, node_kind, node, data) { \
+#define c_ast_unparse_sprint(s, node_kind, node, args...) { \
     auto fmt = string_formatter_default(&string_sw(s)); \
-    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, data)); \
+    ASSERT_OK(c_ast_##node_kind##_unparse_fmt((node), &fmt, ##args)); \
     ASSERT_OK(string_formatter_done(&fmt)); \
 }
 
@@ -110,9 +110,109 @@ struct_def(TestInputCase, {
 // int g_y = 1;
 // #endif
 
+
 Test(Suite1, expr, .disabled=false) {
+// int main() {
+//     suite1_setup();
+    // int x;
+    // typedef Foo;
+    // (x * Foo) + x;
+
     // cr_log_warn("%d", g_y);
-    
+    slice_t
+    test_inputs = slice_lit(
+        TINP(S("x + 3"), true),
+        TINP(S("x +"), false),
+        TINP(S("x - 3*2 - y"), true),
+        TINP(S("x = (a = a1) && b == c || d"), true),
+        TINP(S("x = y = z"), true),
+        TINP(S("x + y + z"), true),
+        TINP(S("x + (y + z)"), true),
+        TINP(S("++x"), true),
+        TINP(S("x = ++(a = a1) && ++b == c || d"), true),
+        TINP(S("++x++"), true),
+        TINP(S("++x(y=z, )++"), false),
+        TINP(S("x(x=y=z, y=z)"), true),
+        TINP(S("++x[x + y.z]++"), true),
+        TINP(S("++x->y.z"), true),
+        TINP(S("x ? y ? a : b : z ? a : b"), true),
+        TINP(S("m = x ? y : z ? a : b"), true),
+        TINP(S("m = arr[x,y]"), true)
+    );
+    slice_t
+    expected_results = slice_lit(
+        S("((x) + (3))"),
+        S("none"),
+        S("(((x) - ((3) * (2))) - (y))"),
+        S("((x) = ((((a) = (a1)) && ((b) == (c))) || (d)))"),
+        S("((x) = ((y) = (z)))"),
+        S("(((x) + (y)) + (z))"),
+        S("((x) + ((y) + (z)))"),
+        S("(++(x))"),
+        S("((x) = (((++((a) = (a1))) && ((++(b)) == (c))) || (d)))"),
+        S("(++((x)++))"),
+        S("none"),
+        S("((x)(((x) = ((y) = (z))), ((y) = (z))))"),
+        S("(++(((x)[((x) + ((y) . (z)))])++))"),
+        S("(++(((x) -> (y)) . (z)))"),
+        S("((x) ? ((y) ? (a) : (b)) : ((z) ? (a) : (b)))"),
+        S("((m) = ((x) ? (y) : ((z) ? (a) : (b))))"),
+        S("((m) = ((arr)[((x), (y))]))")
+    );
+
+    for_in_range(i, 0, slice_len(&test_inputs)) {
+        auto test_input_case = *slice_get_T(TestInputCase, &test_inputs, i);
+        str_t text = test_input_case.input;
+        bool case_val = test_input_case.val;
+
+        LexerState state;
+        lexer_init_default(&state, text, S("<file>"));
+        darr_t tokens;
+        ASSERT(IS_OK(tokenize(&state, &tokens)));
+
+        // dbg_print_tokens(tokens, text, state.file_data_table);
+
+        // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+        C_Token *tok = nullptr;
+        C_Ast_Expr *expr = nullptr;
+        // C_Ast_Type *ty = nullptr;
+
+        ParserState pstate;
+
+        parser_init_default(&pstate, darr_slice_full(tokens));
+
+        // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
+        // c_ast_unparse_println(type, ty, nullptr);
+
+        PARSE_ERROR_PRINT_SUFF(expr, &pstate, &expr);
+        // cr_assert_eq(IS_OK(c_parse_declaration(&pstate, &decl)), case_val);
+        // c_ast_unparse_println(decl, decl, nullptr);
+        String s;
+        string_new_cap_in(64, &pstate.string_alloc, &s);
+
+        if (case_val) {
+            // cr_log_warn("ok");
+            string_reset(&s);
+            c_ast_unparse_sprint(&s, expr, expr, true);
+            cr_assert(str_eq(string_to_str(&s), *slice_get_T(str_t, &expected_results, i)));
+            // println_fmt(string_to_str(&s));
+            // // print_pref(str_t, &string_to_str(&s));
+            // string_free(&s);
+            c_ast_unparse_cr_log(expr, expr, true);
+        } else {
+            cr_log_warn("none");
+        }
+
+        // allocator_free(&g_ctx.global_alloc, (void **)&ty);
+        // str_t c = darr_get_T(Token, tokens, 0)->content.str;
+        // printlnf("%.*s", (int)str_len(c), (char *)c.ptr);
+        parser_deinit(&pstate);
+        darr_free(&tokens);
+        lexer_deinit(&state);
+    }
+
 }
 
 // Test(Suite1, decl, .exit_code=1) {

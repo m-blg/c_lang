@@ -2,10 +2,48 @@
 //  1. lazy error messages (with potential discarding) 
 //  2. lazy init allocations (batch allocation)
 
+#define TYPE_LIST \
+    TYPE_LIST_ENTRY(int), \
+    TYPE_LIST_ENTRY(usize_t), \
+    TYPE_LIST_ENTRY(str_t), \
+    TYPE_LIST_ENTRY(ArenaChunk), \
+    TYPE_LIST_ENTRY(darr_t), \
+    TYPE_LIST_ENTRY(TU_FileData), \
+    TYPE_LIST_ENTRY(C_Symbol), \
+    TYPE_LIST_ENTRY(C_SymbolData), \
+
+
 #include "core/string.h"
+#include "core/array.h"
+#include "core/hashmap.h"
+
+
 struct_def(TU_FileData, {
     str_t text;
     // TODO dependencies maybe
+})
+
+enum_decl(ProcMacroError)
+struct_decl(C_Ast_Node)
+
+typedef str_t C_Symbol;
+typedef hashmap_T(C_Symbol, C_SymbolData) C_SymbolTable;
+
+struct_def(C_PathName, {
+    str_t path;
+})
+
+#include "parsing/c/def.h"
+
+struct_def(C_SymbolData, {
+    C_Ast_Node *node;
+
+    darr_T(C_Symbol) deps; // symbols this symbol depends on 
+    darr_T(C_Symbol) forward_deps; // symbols that depend on this one
+
+#ifdef EXTENDED_C
+    ProcMacroError (*macro_compiled_sym)(C_Ast_Node *, C_Ast_Node **);
+#endif // EXTENDED_C
 })
 
 
@@ -15,16 +53,18 @@ struct_def(TU_FileData, {
 #define TU_FileData_set nullptr
 #define TU_FileData_hash nullptr
 
-#ifndef TYPE_LIST
-#define TYPE_LIST \
-    TYPE_LIST_ENTRY(int), \
-    TYPE_LIST_ENTRY(usize_t), \
-    TYPE_LIST_ENTRY(str_t), \
-    TYPE_LIST_ENTRY(ArenaChunk), \
-    TYPE_LIST_ENTRY(darr_t), \
-    TYPE_LIST_ENTRY(TU_FileData)
+#define C_SymbolData_fmt nullptr
+#define C_SymbolData_dbg_fmt nullptr
+#define C_SymbolData_eq nullptr
+#define C_SymbolData_set nullptr
+#define C_SymbolData_hash nullptr
 
-#endif // TYPE_LIST
+#define C_Symbol_fmt str_t_fmt
+#define C_Symbol_dbg_fmt str_t_dbg_fmt
+#define C_Symbol_eq str_t_eq
+#define C_Symbol_set str_t_set
+#define C_Symbol_hash str_t_hash
+
 
 #define CORE_IMPL
 #include "core/string.h"
@@ -33,7 +73,6 @@ struct_def(TU_FileData, {
 #include "core/arena.h"
 #include "core/hashmap.h"
 
-#include "parsing/c/def.h"
 
 enum_def(LogLevel,
     LOG_LEVEL_WARN,
@@ -169,7 +208,28 @@ struct_def(C_TokenHeaderName, {
     uchar_t brackets; // '<' or '"'
 })
 
+/// n_bits is in 1..=64 range
+// #define bitfield_T(n_bits) _Generic(((n_bits)/8 + ((n_bits)%8 > 0)), 
+//     1: u8_t, 
+//     default: static_assert(false))
+
+// typeof(u8_t[(n_bits)/8 + ((n_bits)%8 > 0)])
+
+
 typedef u8_t C_TokenFlags; 
+
+/// @param bf: bitfield_T(n_bits) *
+/// @param flags: bitfield_T(n_bits)
+#define bitfield_set_flags(bf, flags) { \
+    *(bf) |= (flags); \
+}
+#define bitfield_unset_flags(bf, flags) { \
+    *(bf) &= ~(flags); \
+}
+#define bitfield_is_flag_set(bf, flag) \
+    ((bool) (*(bf) & flag))
+#define bitfield_mask(bf, mask) \
+    ((*(bf) & mask))
 
 typedef enum C_TokenFlag C_TokenFlag; 
 enum C_TokenFlag {
@@ -204,17 +264,20 @@ struct_def(C_Token, {
 INLINE
 void
 c_token_flags_set(C_TokenFlags *flags, C_TokenFlags set_flags) {
-    *flags |= set_flags;
+    // *flags |= set_flags;
+    bitfield_set_flags(flags, set_flags);
 }
 INLINE
 void
 c_token_flags_unset(C_TokenFlags *flags, C_TokenFlags set_flags) {
-    *flags &= ~set_flags;
+    // *flags &= ~set_flags;
+    bitfield_unset_flags(flags, set_flags);
 }
 INLINE
 bool
 c_token_flags_is_set(C_TokenFlags *flags, C_TokenFlag flag) {
-    return (bool) (*flags & flag);
+    // return (bool) (*flags & flag);
+    return bitfield_is_flag_set(flags, flag);
 }
 
 #define c_token_is_flag_set(token, flag) c_token_flags_is_set(&(token)->flags, (flag))

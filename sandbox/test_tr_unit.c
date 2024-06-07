@@ -1,11 +1,5 @@
 #include "parsing/c/tr_unit.c"
 
-AllocatorError
-file_sw(FILE *self, OutputFileStream *out_ofs) {
-    TRY(output_file_stream_new_in(self, 4096, ctx_global_alloc, out_ofs));
-    return ALLOCATOR_ERROR(OK);
-}
-
 
 void
 test1() {
@@ -115,6 +109,6 @@ test_graphvis() {
 int
 main() {
     ctx_init_default();
-    test_graphvis();
+    test1();
     ctx_deinit();
 }

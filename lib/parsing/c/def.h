@@ -153,8 +153,8 @@ enum_def(C_OperatorAssociativity,
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_DIV, "/",   C_PUNCT_SLASH, 3, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_REM, "%",   C_PUNCT_PERCENT, 3, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ADD, "+",   C_PUNCT_PLUS, 2, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUB, "-",   C_PUNCT_MINUS, 2, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ADD, "+",   C_PUNCT_PLUS, 4, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUB, "-",   C_PUNCT_MINUS, 4, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_SHIFT_LEFT, "<<",   C_PUNCT_DOUBLE_LEFT_ANGLE, 5, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_SHIFT_RIGHT, ">>",   C_PUNCT_DOUBLE_RIGHT_ANGLE, 5, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
@@ -191,7 +191,7 @@ enum_def(C_OperatorAssociativity,
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_COMMA, ",",   C_PUNCT_COMMA, 15, C_ASSOCIATIVITY_LEFT_TO_RIGHT), 
 
 // binop
-#define C_OPERATOR_BINOP_LIST \
+#define C_OPERATOR_INFIX_LIST \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_ARROW, "->", C_PUNCT_ARROW, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_DOT, ".", C_PUNCT_DOT, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
@@ -199,14 +199,14 @@ enum_def(C_OperatorAssociativity,
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_DIV, "/",   C_PUNCT_SLASH, 3, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_REM, "%",   C_PUNCT_PERCENT, 3, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ADD, "+",   C_PUNCT_PLUS, 2, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUB, "-",   C_PUNCT_MINUS, 2, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ADD, "+",   C_PUNCT_PLUS, 4, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUB, "-",   C_PUNCT_MINUS, 4, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_SHIFT_LEFT, "<<",   C_PUNCT_DOUBLE_LEFT_ANGLE, 5, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_SHIFT_RIGHT, ">>",   C_PUNCT_DOUBLE_RIGHT_ANGLE, 5, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_LESS, "<", C_PUNCT_LEFT_ANGLE, 6 C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
-    C_OPERATOR_LIST_ENTRY(C_OPERATOR_GREATER, ">",   C_PUNCT_RIGHT_ANGLE, 6 C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_LESS, "<", C_PUNCT_LEFT_ANGLE, 6, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_GREATER, ">",   C_PUNCT_RIGHT_ANGLE, 6, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_LESS_EQUALS, "<=",   C_PUNCT_LEFT_ANGLE_EQUAL, 6, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_GREATER_EQUALS, ">=",   C_PUNCT_RIGHT_ANGLE_EQUAL, 6, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
     \
@@ -232,6 +232,23 @@ enum_def(C_OperatorAssociativity,
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_XOR_ASSIGN, "^=",   C_PUNCT_CARET_EQUAL, 14, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
     C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_OR_ASSIGN, "|=",   C_PUNCT_PIPE_EQUAL, 14, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
 
+#define C_OPERATOR_PREFIX_LIST \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_PREF_INC, "++",   C_PUNCT_PLUS_PLUS, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_PREF_DEC, "--",   C_PUNCT_MINUS_MINUS, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_PLUS, "+",   C_PUNCT_PLUS, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_NEG, "-",   C_PUNCT_MINUS, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_LOGICAL_NOT, "!",   C_PUNCT_EXCLAMATION, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_BIT_NOT, "~",   C_PUNCT_TILDE, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_CAST, "(", C_PUNCT_LEFT_PAREN, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_DEREF, "*",   C_PUNCT_STAR, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ADDRESS_OF, "&",   C_PUNCT_AMPERSAND, 2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SIZEOF, "sizeof",  C_PUNCT_LEFT_PAREN,  2, C_ASSOCIATIVITY_RIGHT_TO_LEFT), \
+
+#define C_OPERATOR_POSTFIX_LIST \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUFF_INC, "++",   C_PUNCT_PLUS_PLUS, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_SUFF_DEC, "--",   C_PUNCT_MINUS_MINUS, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_FN_CALL, "(", C_PUNCT_LEFT_PAREN, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
+    C_OPERATOR_LIST_ENTRY(C_OPERATOR_ARRAY_SUB, "[", C_PUNCT_LEFT_BRACKET, 1, C_ASSOCIATIVITY_LEFT_TO_RIGHT), \
 
 // ///    C_PUNCT_LIST_ENTRY(str, kind, precedence, associativity)
 // #define C_PUNCT_LIST 
@@ -517,13 +534,18 @@ enum_def(C_OperatorKind,
 
 typedef u8_t C_OperatorPrecedence;
 
+
 struct_def(C_OperatorData, {
+    C_Symbol sym;
+    C_PunctKind punct_kind;
     C_OperatorPrecedence precedence;
     C_OperatorAssociativity associativity;
 })
 
-#define C_OPERATOR_LIST_ENTRY(op_kind, sym, punct_kind, prec, assoc) \
+#define C_OPERATOR_LIST_ENTRY(op_kind, symbol, _punct_kind, prec, assoc) \
     [op_kind] = (C_OperatorData) { \
+        .sym = S(symbol), \
+        .punct_kind = _punct_kind, \
         .precedence = prec, \
         .associativity = assoc, \
     }
@@ -539,14 +561,29 @@ g_c_operators[C_OPERATOR_COUNT] = {
     [punct_kind] = op_kind
 
 C_OperatorKind
-g_c_punct_to_binop_table[C_PUNCT_COUNT] = {
-    C_OPERATOR_LIST
+g_c_punct_to_infix_table[C_PUNCT_COUNT] = {
+    C_OPERATOR_INFIX_LIST
+};
+
+C_OperatorKind
+g_c_punct_to_prefix_table[C_PUNCT_COUNT] = {
+    C_OPERATOR_PREFIX_LIST
+};
+
+C_OperatorKind
+g_c_punct_to_postfix_table[C_PUNCT_COUNT] = {
+    C_OPERATOR_POSTFIX_LIST
 };
 #undef C_OPERATOR_LIST_ENTRY
     
 
 #define C_MAX_PRECEDENCE 15
 
+INLINE
+C_OperatorData
+c_operator_data(C_OperatorKind op_kind) {
+    return g_c_operators[op_kind];
+}
 INLINE
 C_OperatorPrecedence
 c_operator_precedence(C_OperatorKind op_kind) {
@@ -560,18 +597,21 @@ c_operator_associativity(C_OperatorKind op_kind) {
 
 INLINE
 C_OperatorKind
-c_punct_kind_to_binop_kind(C_PunctKind punct_kind) {
-    return g_c_punct_to_binop_table[punct_kind];
+c_punct_kind_to_infix_kind(C_PunctKind punct_kind) {
+    return g_c_punct_to_infix_table[punct_kind];
+}
+INLINE
+C_OperatorKind
+c_punct_kind_to_prefix_kind(C_PunctKind punct_kind) {
+    return g_c_punct_to_prefix_table[punct_kind];
+}
+INLINE
+C_OperatorKind
+c_punct_kind_to_postfix_kind(C_PunctKind punct_kind) {
+    return g_c_punct_to_postfix_table[punct_kind];
 }
 
 
 
 
-typedef str_t C_Symbol;
-typedef hashmap_T(C_Symbol, C_SymbolData) C_SymbolTable;
-
-
-struct_def(C_PathName, {
-    str_t path;
-})
 
