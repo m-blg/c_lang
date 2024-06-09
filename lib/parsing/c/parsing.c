@@ -10,6 +10,15 @@ struct_def(C_ParserSpan, {
     usize_t b_tok;
     usize_t e_tok;
 })
+// struct_def(ParserPos, {
+//     str_t file_path;
+//     usize_t byte_offset;
+//     usize_t line;
+//     usize_t col;
+// })
+// #define ParserPos Pos
+typedef Pos ParserPos; 
+
 
 /// better go for ast directly, no need for syntax tree
 
@@ -413,6 +422,10 @@ enum_def(C_Ast_StmtKind,
     C_AST_STMT_KIND_IF,
     C_AST_STMT_KIND_SWITCH,
 
+    C_AST_STMT_KIND_LABEL,
+    C_AST_STMT_KIND_CASE,
+    C_AST_STMT_KIND_DEFAULT,
+
     C_AST_STMT_KIND_FOR,
     C_AST_STMT_KIND_WHILE,
     C_AST_STMT_KIND_DO_WHILE,
@@ -451,12 +464,26 @@ struct_def(C_Ast_StmtSwitch, {
     C_Ast_Stmt *s_body;
 })
 
+struct_def(C_Ast_StmtCase, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Expr *e_item;
+})
+struct_def(C_Ast_StmtDefault, {
+    C_AST_NODE_STMT_BASE
+})
+struct_def(C_Ast_StmtLabel, {
+    C_AST_NODE_STMT_BASE
+
+    C_Ast_Ident *label;
+})
+
 struct_def(C_Ast_StmtFor, {
     C_AST_NODE_STMT_BASE
 
     C_Ast_Decl NLB(*)d_vars;
     C_Ast_Expr NLB(*)e_cond;
-    C_Ast_Expr NLB(*)e_next;
+    C_Ast_Expr NLB(*)e_step;
 
     C_Ast_Stmt *s_body;
 })
@@ -507,6 +534,10 @@ struct_def(C_Ast_Stmt, {
 
         C_Ast_StmtIf s_if;
         C_Ast_StmtSwitch s_switch;
+
+        C_Ast_StmtCase s_case;
+        C_Ast_StmtDefault s_default;
+        C_Ast_StmtLabel s_label;
 
         C_Ast_StmtFor s_for;
         C_Ast_StmtWhile s_while;
@@ -649,7 +680,7 @@ enum_def(ParsingErrorMsgKind,
     PARSING_ERROR_MESSAGE_KIND_EXPECTED,
 )
 struct_def(ParsingErrorData, {
-    Pos pos;
+    ParserPos pos;
     str_t msg;
 
     ParsingErrorMsgKind msg_kind;
@@ -723,7 +754,7 @@ struct_def(ParserState, {
     Allocator string_alloc;
 
     void (*alloc_error_handler)(ParserState *, AllocatorError, void *);
-    void (*error)(str_t, str_t, Pos, LogLevel);
+    void (*error)(str_t, str_t, ParserPos, LogLevel);
 })
 
 
@@ -846,6 +877,18 @@ parser_peek(ParserState *state) {
     BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
     return slice_get_T(C_Token, &state->tokens, state->cur);
 }
+INLINE
+C_Token *
+parser_peek2(ParserState *state) {
+    BOUNDS_ASSERT(0 <= state->cur && state->cur < slice_len(&state->tokens));
+    auto cur = state->cur;
+    state->cur += 1;
+    parser_skip_new_line(state);
+    C_Token *tok = slice_get_T(C_Token, &state->tokens, state->cur);
+    state->cur = cur;
+    return tok;
+}
+
 
 #define parser_peek_punct_kind(state, _kind) \
     (parser_peek(state)->kind == C_TOKEN_KIND_PUNCT && \
@@ -917,39 +960,57 @@ parser_restore(ParserState *state, ParserSavepoint *save) {
     return PARSING_ERROR(OK); \
 } \
 
+INLINE
+ParserPos
+parser_pos_from_t_index(ParserState *state, usize_t ind) {
+    auto span = &slice_get_T(C_Token, &state->tokens, ind)->span;
+    return (ParserPos) {
+        .byte_offset = span->b_byte_offset,
+        .line = span->b_line,
+        .col = span->b_col,
+        .file_path = span->file_path,
+    };
+}
 
+INLINE
+ParserPos
+parser_pos(ParserState *state) {
+    return parser_pos_from_t_index(state, state->cur);
+}
+
+#define parser_error_pos(state, _pos, _msg, args...) { \
+    if (!state->was_error) { \
+        (state)->last_error = (ParsingErrorData) { \
+            .pos = (_pos), \
+            .msg = (_msg), \
+            .msg_kind = PARSING_ERROR_MESSAGE_KIND_NORMAL, \
+            ##args \
+        }; \
+        (state)->was_error = true; \
+    } \
+}
 #define parser_error(state, _msg, args...) { \
-    auto span = &slice_get_T(C_Token, &state->tokens, state->cur)->span; \
-    auto pos = (Pos) { \
-        .byte_offset = span->b_byte_offset, \
-        .line = span->b_line, \
-        .col = span->b_col, \
-        .file_path = span->file_path, \
-    }; \
-    (state)->last_error = (ParsingErrorData) { \
-        .pos = pos, \
-        .msg = (_msg), \
-        .msg_kind = PARSING_ERROR_MESSAGE_KIND_NORMAL, \
-        ##args \
-    }; \
-    (state)->was_error = true; \
+    if (!state->was_error) { \
+        (state)->last_error = (ParsingErrorData) { \
+            .pos = parser_pos(state), \
+            .msg = (_msg), \
+            .msg_kind = PARSING_ERROR_MESSAGE_KIND_NORMAL, \
+            ##args \
+        }; \
+        (state)->was_error = true; \
+    } \
 }
 
 #define parser_error_expected(state, expected, args...) { \
-    auto span = &slice_get_T(C_Token, &state->tokens, state->cur)->span; \
-    auto pos = (Pos) { \
-        .byte_offset = span->b_byte_offset, \
-        .line = span->b_line, \
-        .col = span->b_col, \
-        .file_path = span->file_path, \
-    }; \
-    (state)->last_error = (ParsingErrorData) { \
-        .pos = pos, \
-        .msg = (expected), \
-        .msg_kind = PARSING_ERROR_MESSAGE_KIND_EXPECTED, \
-        ##args \
-    }; \
-    (state)->was_error = true; \
+    if (!state->was_error) { \
+        (state)->last_error = (ParsingErrorData) { \
+            .pos = parser_pos(state), \
+            .msg = (expected), \
+            .msg_kind = PARSING_ERROR_MESSAGE_KIND_EXPECTED, \
+            ##args \
+        }; \
+        (state)->was_error = true; \
+    } \
 }
 
 
@@ -1062,7 +1123,18 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
 
 #define c_parse_decl c_parse_declaration
 
-// #define PARSER_TRY(p) if (IS_ERR(p)) { PARSING_NONE(PARSER_TRY_STATE, &PARSER_TRY_PREV) }
+#define PARSER_TRY(p) \
+    if (IS_ERR(p)) { \
+        PARSING_NONE(state, &prev); \
+    }
+
+// NOTE: use of gcc statement expression
+#define PARSER_OPTIONAL(p) ({\
+        auto res = (p); \
+        state->was_error = false; \
+        res; \
+})
+
 
 
 INLINE
@@ -1168,7 +1240,7 @@ c_parse_lit_compound_body(ParserState *state, darr_T(C_Ast_LiteralCompoundEntry)
     C_Token *tok;
 
     while (true) {
-        if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_DOT, &tok))) {
+        if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_DOT, &tok)))) {
             unimplemented();
         } else if (
             // TODO better introduce flags
@@ -1184,7 +1256,7 @@ c_parse_lit_compound_body(ParserState *state, darr_T(C_Ast_LiteralCompoundEntry)
         }));
 
 
-        if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+        if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
             break;
         }
     }
@@ -1230,7 +1302,7 @@ c_token_is_type_name_beginning(C_Environment env, C_Token *tok) {
         ASSERT(node->kind == C_AST_NODE_KIND_DECL);
         return node->decl.decl_kind == C_AST_DECL_KIND_TYPEDEF || node->decl.decl_kind == C_AST_DECL_KIND_TYPE_DECL;
     } else if (tok->kind == C_TOKEN_KIND_KEYWORD) {
-        return c_keyword_is_type_specifier(tok->t_keyword.keyword_kind);
+        return c_keyword_is_type_name_beginning(tok->t_keyword.keyword_kind);
         // auto data = c_environment_get_sym_data(env, c_keyword_str_from_kind(tok->t_keyword.keyword_kind));
         // if (data == nullptr) {
         //     return false;
@@ -1243,11 +1315,6 @@ c_token_is_type_name_beginning(C_Environment env, C_Token *tok) {
         return false;
     }
 }
-
-#define PARSER_TRY(p) \
-    if (IS_ERR(p)) { \
-        PARSING_NONE(state, &prev); \
-    }
 
 /// @brief parses binop if its precedence < max_precedence or 
 ///   (if is_strict_precedence is false) precedence == max_precedence && its associativity is right-to-left
@@ -1427,7 +1494,7 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
                 if (parser_peek_punct_kind(state, C_PUNCT_LEFT_BRACE)) {
                     // compound literal
                     darr_t items = nullptr;
-                    c_parse_lit_compound_body(state, &items);
+                    PARSER_OPTIONAL(c_parse_lit_compound_body(state, &items));
                     C_Ast_LiteralCompound *lit;
                     make_node_lit(state, &lit, COMPOUND, 
                         .ty = ty,
@@ -1435,9 +1502,13 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
                     make_node_expr(state, (C_Ast_ExprLit **)&first, LITERAL,
                         .lit = (C_Ast_Literal *)lit);
                 } else {
-                    unimplemented();
+                    C_Ast_ExprCast *op;
                     // cast operator
-                    make_node_expr(state, (C_Ast_ExprCast **)&first, CAST);
+                    make_node_expr(state, (C_Ast_ExprCast **)&op, CAST,
+                        .ty = ty);
+
+                    PARSER_TRY(_c_parse_expr(state, &op->e_rhs, c_operator_precedence(C_OPERATOR_CAST), C_EXPR_FLAG_EMPTY));
+                    first = (C_Ast_Expr *)op;
                 }
             } else {
                 // parenthesized expression
@@ -1526,7 +1597,7 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
     while (true) {
         auto prev = parser_save(state);
         C_Ast_ExprUnOp *op = nullptr;
-        if (IS_ERR(c_parse_expr_op_postfix_prec_rb(state, &op, max_precedence))) {
+        if (IS_ERR(PARSER_OPTIONAL(c_parse_expr_op_postfix_prec_rb(state, &op, max_precedence)))) {
             break;
         }
 
@@ -1536,11 +1607,11 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
             C_Ast_Expr *arg = nullptr;
             darr_T(C_Ast_Expr *) args = nullptr;
 
-            if (IS_OK(c_parse_expr_assign(state, &arg))) {
+            if (IS_OK(PARSER_OPTIONAL(c_parse_expr_assign(state, &arg)))) {
                 PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Expr *, 4, &state->ast_alloc, &args));
                 PARSER_ALLOC_HANDLE(darr_push(&args, &arg));
                 while (true) {
-                    if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+                    if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
                         break;
                     }
                     PARSER_TRY(c_parse_expr_assign(state, &arg));
@@ -1558,7 +1629,7 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
             C_Ast_ExprArraySub *op = nullptr;
             C_Ast_Expr *arg = nullptr;
 
-            c_parse_expr(state, &arg);
+            PARSER_OPTIONAL(c_parse_expr(state, &arg));
 
             PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACKET, &tok));
             make_node_expr(state, (C_Ast_ExprArraySub **)&op, ARRAY_SUB,
@@ -1576,7 +1647,7 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
     // parses at max_precedence level
     while (true) {
         C_Ast_ExprBinOp *op;
-        if (IS_ERR(c_parse_expr_op_infix_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE)))) {
+        if (IS_ERR(PARSER_OPTIONAL(c_parse_expr_op_infix_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE))))) {
             break;
         }
 
@@ -1589,7 +1660,7 @@ _c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_
     // ternary condition operator
     {
         C_Ast_ExprCondOp *op = nullptr;
-        if (IS_OK(c_parse_expr_op_tern_cond_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE)))) {
+        if (IS_OK(PARSER_OPTIONAL(c_parse_expr_op_tern_cond_prec_rb(state, &op, max_precedence, bitfield_is_flag_set(&flags, C_EXPR_FLAG_STRICT_PRECEDENCE))))) {
             op->e_cond = left;
             PARSER_TRY(c_parse_expr(state, &op->e_then));
             PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_COLON, &tok));
@@ -1624,7 +1695,7 @@ c_parse_expr(ParserState *state, C_Ast_Expr **out_expr) {
 
     // won't parse ',' due to strict precedence flag
     TRY(_c_parse_expr(state, &expr, C_MAX_PRECEDENCE, C_EXPR_FLAG_STRICT_PRECEDENCE));
-    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
         darr_T(C_Ast_Expr *) items; 
         PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Expr *, 4, &state->ast_alloc, &items));
         PARSER_ALLOC_HANDLE(darr_push(&items, &expr));
@@ -1632,7 +1703,7 @@ c_parse_expr(ParserState *state, C_Ast_Expr **out_expr) {
         while (true) {
             PARSER_TRY(_c_parse_expr(state, &expr, C_MAX_PRECEDENCE, C_EXPR_FLAG_STRICT_PRECEDENCE));
             PARSER_ALLOC_HANDLE(darr_push(&items, &expr));
-            if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+            if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
                 break;
             }
         }
@@ -1671,6 +1742,7 @@ c_parse_block(ParserState *state, C_SymbolTable *scope, darr_T(C_Ast_BlockItem *
 
 ParsingError
 c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
+    // state->was_error = false;
 
     auto prev = parser_save(state);
     C_Token *tok = parser_peek(state);
@@ -1680,8 +1752,21 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
     case C_TOKEN_KIND_CHAR:
     case C_TOKEN_KIND_STRING:
     case C_TOKEN_KIND_NUMBER:
-    case C_TOKEN_KIND_IDENT:
         TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
+        break;
+    case C_TOKEN_KIND_IDENT:
+        tok = parser_peek2(state);
+        if (tok->kind == C_TOKEN_KIND_PUNCT && tok->t_punct.punct_kind == C_PUNCT_COLON) {
+            C_Ast_Ident *label = nullptr;
+            c_parse_ident(state, &label);
+            parser_advance(state);
+            make_node_stmt(state, (C_Ast_StmtLabel **)out_stmt, LABEL, 
+                .label = label,
+                .span = parser_span_from_save(state, &prev));
+        } else {
+            TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
+        }
+
         break;
     case C_TOKEN_KIND_PUNCT:
         if (tok->t_punct.punct_kind == C_PUNCT_LEFT_BRACE) {
@@ -1693,7 +1778,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
 
            darr_T(C_Ast_BlockItem*) items = nullptr; 
            C_SymbolTable scope = nullptr;
-           c_parse_block(state, &scope, &items);
+           PARSER_OPTIONAL(c_parse_block(state, &scope, &items));
 
 
             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
@@ -1729,7 +1814,7 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
             PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
             PARSER_TRY(c_parse_stmt(state, &then));
             
-            if (IS_OK(c_parse_t_keyword_kind(state, C_KEYWORD_ELSE, &tok))) {
+            if (IS_OK(PARSER_OPTIONAL(c_parse_t_keyword_kind(state, C_KEYWORD_ELSE, &tok)))) {
                 PARSER_TRY(c_parse_stmt(state, &_else));
             }
 
@@ -1741,32 +1826,131 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
             
             break;
         }
-        case C_KEYWORD_SWITCH:
-            unimplemented();
-            break;
+        case C_KEYWORD_SWITCH: {
+            C_Ast_Expr *item = nullptr;
+            C_Ast_Stmt *body = nullptr;
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))
+            PARSER_TRY(c_parse_expr(state, &item));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            PARSER_TRY(c_parse_stmt(state, &body));
 
-        case C_KEYWORD_FOR:
-            unimplemented();
+            make_node_stmt(state, (C_Ast_StmtSwitch **)out_stmt, SWITCH, 
+                .e_item = item,
+                .s_body = body,
+                .span = parser_span_from_save(state, &prev));
             break;
-        case C_KEYWORD_WHILE:
-            unimplemented();
-            break;
-        case C_KEYWORD_DO:
-            unimplemented();
-            break;
+        }
+        case C_KEYWORD_CASE: {
+            C_Ast_Expr *item = nullptr;
+            PARSER_TRY(c_parse_expr(state, &item));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_COLON, &tok));
 
-        case C_KEYWORD_GOTO:
-            unimplemented();
+            make_node_stmt(state, (C_Ast_StmtCase **)out_stmt, CASE, 
+                .e_item = item,
+                .span = parser_span_from_save(state, &prev));
             break;
-        case C_KEYWORD_BREAK:
-            unimplemented();
+        }
+        case C_KEYWORD_DEFAULT: {
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_COLON, &tok));
+
+            make_node_stmt(state, (C_Ast_StmtDefault **)out_stmt, DEFAULT, 
+                .span = parser_span_from_save(state, &prev));
             break;
-        case C_KEYWORD_CONTINUE:
-            unimplemented();
+        }
+        case C_KEYWORD_FOR: {
+            C_Ast_Decl *vars = nullptr;
+            C_Ast_Expr *cond = nullptr,
+                       *step = nullptr;
+            C_Ast_Stmt *body = nullptr;
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))
+            PARSER_TRY(c_parse_decl(state, &vars));
+            if (vars->decl_kind == C_AST_DECL_KIND_EMPTY) {
+                allocator_free(&state->ast_alloc, (void **)&vars);
+            } else if (vars->decl_kind != C_AST_DECL_KIND_VARIABLE) {
+                parser_error_expected(state, S("variable declaration"));
+                PARSING_NONE(state, &prev);
+            }
+            // decl parsed ';'
+            PARSER_OPTIONAL(c_parse_expr(state, &cond));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+            PARSER_OPTIONAL(c_parse_expr(state, &step));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            PARSER_TRY(c_parse_stmt(state, &body));
+
+            make_node_stmt(state, (C_Ast_StmtFor **)out_stmt, FOR, 
+                .d_vars = vars,
+                .e_cond = cond,
+                .e_step = step,
+                .s_body = body,
+                .span = parser_span_from_save(state, &prev));
             break;
-        case C_KEYWORD_RETURN:
-            unimplemented();
+        }
+        case C_KEYWORD_WHILE: {
+            C_Ast_Expr *cond = nullptr;
+            C_Ast_Stmt *body = nullptr;
+
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))
+            PARSER_TRY(c_parse_expr(state, &cond));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            PARSER_TRY(c_parse_stmt(state, &body));
+
+            make_node_stmt(state, (C_Ast_StmtWhile **)out_stmt, WHILE, 
+                .e_cond = cond,
+                .s_body = body,
+                .span = parser_span_from_save(state, &prev));
+            
             break;
+        }
+        case C_KEYWORD_DO: {
+            C_Ast_Stmt *body = nullptr;
+            C_Ast_Expr *cond = nullptr;
+
+            PARSER_TRY(c_parse_stmt(state, &body));
+            PARSER_TRY(c_parse_t_keyword_kind(state, C_KEYWORD_WHILE, &tok))
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))
+            PARSER_TRY(c_parse_expr(state, &cond));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+
+            make_node_stmt(state, (C_Ast_StmtDoWhile **)out_stmt, DO_WHILE, 
+                .s_body = body,
+                .e_cond = cond,
+                .span = parser_span_from_save(state, &prev));
+            
+            break;
+        }
+        case C_KEYWORD_GOTO: {
+            C_Ast_Ident *label = nullptr;
+            PARSER_TRY(c_parse_ident(state, &label));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+
+            make_node_stmt(state, (C_Ast_StmtGoto **)out_stmt, GOTO, 
+                .label = label,
+                .span = parser_span_from_save(state, &prev));
+            break;
+        }
+        case C_KEYWORD_BREAK: {
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+            make_node_stmt(state, (C_Ast_StmtBreak **)out_stmt, BREAK, 
+                .span = parser_span_from_save(state, &prev));
+            break;
+        }
+        case C_KEYWORD_CONTINUE: {
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+            make_node_stmt(state, (C_Ast_StmtContinue **)out_stmt, CONTINUE, 
+                .span = parser_span_from_save(state, &prev));
+            break;
+        }
+        case C_KEYWORD_RETURN: {
+            C_Ast_Expr *expr = nullptr;
+            PARSER_OPTIONAL(c_parse_expr(state, &expr));
+            PARSER_TRY(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok));
+
+            make_node_stmt(state, (C_Ast_StmtReturn **)out_stmt, RETURN, 
+                .e_ret = expr,
+                .span = parser_span_from_save(state, &prev));
+            break;
+        }
         
         default:
             TRY(c_parse_stmt_expr(state, (C_Ast_StmtExpr **)out_stmt));
@@ -1792,34 +1976,55 @@ c_parse_stmt(ParserState *state, C_Ast_Stmt **out_stmt) {
     PARSING_OK(state);
 }
 
-ParsingError
-c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item) {
-    if (IS_OK(c_parse_decl(state, (C_Ast_Decl **)out_block_item))) {
-        PARSING_OK(state);
-    } else if (IS_OK(c_parse_stmt(state, (C_Ast_Stmt **)out_block_item))) {
-        PARSING_OK(state);
-    } else {
-        return PARSING_ERROR(NONE);
+// ParsingError
+// c_parse_block_item(ParserState *state, C_Ast_BlockItem **out_block_item) {
+//     if (IS_OK(c_parse_decl(state, (C_Ast_Decl **)out_block_item))) {
+//         PARSING_OK(state);
+//     } else if (IS_OK(c_parse_stmt(state, (C_Ast_Stmt **)out_block_item))) {
+//         PARSING_OK(state);
+//     } else {
+//         return PARSING_ERROR(NONE);
+//     }
+// }
+
+bool
+c_scope_add_symbol(C_SymbolTable *scope, C_Symbol sym, C_SymbolData *data) {
+    if (hashmap_get(*scope, &sym) != nullptr) {
+        // eprint_fmt(S(KRED"ERROR: "KNRM"redefinition of"KMAG" %s"KNRM"\nat "KYEL"%s:%u:%u"KNRM), sym,
+        //     p.file_path, p.line, p.col);
+        return false;
     }
+    ASSERT_OK(hashmap_set(scope, &sym, data));
+    return true;
 }
 
-void
-c_scope_collect_symbols_decl(C_SymbolTable *scope, C_Ast_Decl *decl) {
+bool
+c_parser_scope_collect_symbols_decl(ParserState *state, C_SymbolTable *scope, C_Ast_Decl *decl) {
+    #define abort(name) { \
+        parser_error_pos(state, parser_pos_from_t_index(state, decl->span.b_tok), S("redefinition of "KMAG"%s"KNRM), (name)); \
+        return false; \
+    }
     switch (decl->decl_kind)
     {
     case C_AST_DECL_KIND_TYPEDEF: {
-        ASSERT_OK(hashmap_set(scope, &decl->d_typedef.name->name, 
+        if (!c_scope_add_symbol(scope, decl->d_typedef.name->name, 
             &(C_SymbolData) {
                 .node = (C_Ast_Node *)decl,
-            }));
+            })) 
+        {
+            abort(decl->d_typedef.name->name);
+        }
         
         if (decl->d_typedef.others) {
             for_in_range(i, 0, darr_len(decl->d_typedef.others)) {
-                auto name = darr_get_T(str_t, decl->d_typedef.others, i);
-                ASSERT_OK(hashmap_set(scope, name, 
+                auto dec = darr_get_T(C_Ast_Declarator, decl->d_typedef.others, i);
+                if (!c_scope_add_symbol(scope, dec->name->name, 
                     &(C_SymbolData) {
                         .node = (C_Ast_Node *)decl,
-                    }));
+                    })) 
+                {
+                    abort(dec->name->name);
+                }
             }
         }
         break;
@@ -1830,66 +2035,101 @@ c_scope_collect_symbols_decl(C_SymbolTable *scope, C_Ast_Decl *decl) {
         {
         case C_AST_TYPE_KIND_STRUCT:
             if (ty->ty_struct.name) {
-                ASSERT_OK(hashmap_set(scope, &ty->ty_struct.name, 
+                str_t name = ty->ty_struct.name->name;
+                String s;
+                PARSER_ALLOC_HANDLE(string_new_cap_in(str_len(S("struct ")) + str_len(name), &state->string_alloc, &s));
+                sprint_fmt(&s, S("struct %s"), name);
+                if (!c_scope_add_symbol(scope, string_to_str(&s), 
                     &(C_SymbolData) {
                         .node = (C_Ast_Node *)decl,
-                    }));
+                    })) 
+                {
+                    abort(string_to_str(&s));
+                }
             }
             break;
         case C_AST_TYPE_KIND_UNION:
             if (ty->ty_union.name) {
-                ASSERT_OK(hashmap_set(scope, &ty->ty_union.name, 
+                str_t name = ty->ty_union.name->name;
+                String s;
+                PARSER_ALLOC_HANDLE(string_new_cap_in(str_len(S("union ")) + str_len(name), &state->string_alloc, &s));
+                sprint_fmt(&s, S("union %s"), name);
+                if (!c_scope_add_symbol(scope, string_to_str(&s), 
                     &(C_SymbolData) {
                         .node = (C_Ast_Node *)decl,
-                    }));
+                    })) 
+                {
+                    abort(string_to_str(&s));
+                }
             }
             break;
         case C_AST_TYPE_KIND_ENUM:
             if (ty->ty_enum.name) {
-                ASSERT_OK(hashmap_set(scope, &ty->ty_enum.name, 
+                str_t name = ty->ty_enum.name->name;
+                String s;
+                PARSER_ALLOC_HANDLE(string_new_cap_in(str_len(S("enum ")) + str_len(name), &state->string_alloc, &s));
+                sprint_fmt(&s, S("enum %s"), name);
+                if (!c_scope_add_symbol(scope, string_to_str(&s), 
                     &(C_SymbolData) {
                         .node = (C_Ast_Node *)decl,
-                    }));
+                    })) 
+                {
+                    abort(string_to_str(&s));
+                }
             }
             break;
         
         default:
             goto out;
         }
-        ASSERT_OK(hashmap_set(scope, &decl->d_type.ty,
-            &(C_SymbolData) {
-                .node = (C_Ast_Node *)decl,
-            }));
+        // ASSERT_OK(hashmap_set(scope, &decl->d_type.ty,
+        //     &(C_SymbolData) {
+        //         .node = (C_Ast_Node *)decl,
+        //     }));
         break;
     }
     case C_AST_DECL_KIND_VARIABLE: {
-        ASSERT_OK(hashmap_set(scope, &decl->d_var.name->name, 
+        if (!c_scope_add_symbol(scope, decl->d_var.name->name, 
             &(C_SymbolData) {
                 .node = (C_Ast_Node *)decl,
-            }));
+            })) 
+        {
+            abort(decl->d_var.name->name);
+        }
         
         if (decl->d_var.others) {
             for_in_range(i, 0, darr_len(decl->d_var.others)) {
-                auto name = darr_get_T(str_t, decl->d_var.others, i);
-                ASSERT_OK(hashmap_set(scope, name, 
+                auto idec = darr_get_T(C_Ast_InitDeclarator, decl->d_var.others, i);
+                if (!c_scope_add_symbol(scope, idec->name->name,
                     &(C_SymbolData) {
                         .node = (C_Ast_Node *)decl,
-                    }));
+                    })) 
+                {
+                    abort(idec->name->name);
+                }
             }
         }
         break;
     }
     case C_AST_DECL_KIND_FN_DEF: {
-        ASSERT_OK(hashmap_set(scope, &decl->d_fn_def.name->name, 
+        if (!c_scope_add_symbol(scope, decl->d_fn_def.name->name, 
             &(C_SymbolData) {
                 .node = (C_Ast_Node *)decl,
-            }));
+            })) 
+        {
+            abort(decl->d_fn_def.name->name);
+        }
+        break;
     }
+    case C_AST_DECL_KIND_EMPTY:
+        break;
     
     default:
+        unreacheble();
         break;
     }
 out:
+    return true;
 }
 
 ParsingError
@@ -1904,29 +2144,27 @@ c_parse_block(ParserState *state, C_SymbolTable *scope, darr_T(C_Ast_BlockItem *
     c_environment_push_scope(&state->env, scope);
 
     while (true) {
+        // C_Token *tok = parser_peek(state);
         if (parser_peek_punct_kind(state, C_PUNCT_RIGHT_BRACE)) {
             break;
         }
+        if (parser_peek_punct_kind(state, C_PUNCT_SEMI_COLON) || 
+            c_token_is_type_name_beginning(state->env, parser_peek(state))) 
         {
+            // auto save = parser_save(state);
             C_Ast_Decl *block_item = nullptr;
-            if (IS_OK(c_parse_decl(state, &block_item))) {
-                PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
-                if (state->collect_symbols) {
-                    c_scope_collect_symbols_decl(scope, block_item);
+            PARSER_TRY(c_parse_decl(state, &block_item))
+            PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
+            if (state->collect_symbols) {
+                if (!c_parser_scope_collect_symbols_decl(state, scope, block_item)) {
+                    PARSING_NONE(state, &prev);
                 }
-                continue;
             }
-        }
-
-        {
+        } else {
             C_Ast_Stmt *block_item = nullptr;
-            if (IS_OK(c_parse_stmt(state, &block_item))) {
-                PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
-                continue;
-            }
+            PARSER_TRY(c_parse_stmt(state, &block_item))
+            PARSER_ALLOC_HANDLE(darr_push(&items, &block_item));
         }
-
-        PARSING_NONE(state, &prev);
     }
 
     c_environment_pop_scope(&state->env);
@@ -2006,7 +2244,6 @@ c_ast_type_append(C_Ast_Type *node, C_Ast_Type *leaf) {
     case C_AST_TYPE_KIND_FUNCTION:
         node->ty_fn.ret = leaf;
         break;
-        break;
 
     default:
         unreacheble();
@@ -2042,7 +2279,7 @@ c_parse_direct_declarator(ParserState *state,
     C_Ast_Type *_decl_ty_head = nullptr, 
                *_decl_ty_leaf = nullptr;
 
-    if (IS_OK(c_parse_ident(state, decl_name))) 
+    if (IS_OK(PARSER_OPTIONAL(c_parse_ident(state, decl_name)))) 
     // if (c_parser_is_ident(state))
     {
         // c_parser_make_ident(state, decl_name);
@@ -2050,7 +2287,7 @@ c_parse_direct_declarator(ParserState *state,
         _decl_ty_leaf = nullptr;
         // PARSING_OK(state);
     } 
-    else if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))) 
+    else if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok)))) 
     {
         if (IS_ERR(c_parse_declarator(state, &_decl_ty_head, &_decl_ty_leaf, decl_name)) ||
             IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok))) 
@@ -2058,13 +2295,14 @@ c_parse_direct_declarator(ParserState *state,
             PARSING_NONE(state, &prev);
         }
     } else {
+        parser_error_expected(state, S("direct-declarator"));
         PARSING_NONE(state, &prev);
     }
 
     C_Ast_Type *ty = nullptr;
 
     auto save_fn = parser_save(state);
-    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok)))) {
         if (_decl_ty_leaf && _decl_ty_leaf->ty_kind == C_AST_TYPE_KIND_ARRAY) {
             parser_error(state, S("arrays of funtions are not allowed"));
             PARSING_NONE(state, &prev);
@@ -2083,11 +2321,11 @@ c_parse_direct_declarator(ParserState *state,
 
             while (true) {
                 auto save_par = parser_save(state);
-                if (IS_ERR(c_parse_type_specifier(state, &ty))) {
+                if (IS_ERR(PARSER_OPTIONAL(c_parse_type_specifier(state, &ty)))) {
                     break;
                 }
                 if (IS_ERR(c_parse_declarator(state, &head, &leaf, &name))) {
-                    parser_error(state, S("arrays of funtions are not allowed"));
+                    // parser_error(state, S("arrays of funtions are not allowed"));
                     if (params) {
                         darr_free(&params);
                     }
@@ -2111,7 +2349,7 @@ c_parse_direct_declarator(ParserState *state,
                         .ty = head,
                     }));
                 
-                if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+                if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
                     break;
                 }
             }
@@ -2141,7 +2379,7 @@ c_parse_direct_declarator(ParserState *state,
     while (true) {
         auto save_br = parser_save(state);
         // [], ()
-        if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACKET, &tok))) {
+        if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACKET, &tok)))) {
             if (_decl_ty_leaf && _decl_ty_leaf->ty_kind == C_AST_TYPE_KIND_FUNCTION) {
                 parser_error(state, S("funtions returning array are not allowed"));
                 PARSING_NONE(state, &prev);
@@ -2153,7 +2391,7 @@ c_parse_direct_declarator(ParserState *state,
             // {
             //     unimplemented();
             // }
-            c_parse_expr_assign(state, &expr);
+            PARSER_OPTIONAL(c_parse_expr_assign(state, &expr));
 
             if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACKET, &tok))) {
                 PARSING_NONE(state, &prev);
@@ -2207,7 +2445,7 @@ c_parse_declarator(ParserState *state,
                *pointer_decl_ty_leaf = nullptr,
                *ty = nullptr;
     // pointer
-    while (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_STAR, &tok))) {
+    while (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_STAR, &tok)))) {
         make_node_type(state, (C_Ast_TypePointer **)&ty, POINTER, 
             .pointee = nullptr,
             .span = parser_span_from_save(state, &prev));
@@ -2256,7 +2494,7 @@ c_parse_record(ParserState *state, C_Ast_TypeKind struct_or_union_kind, C_Ast_Ty
 
     auto prev = parser_save(state);
 
-    c_parse_ident(state, &name);
+    PARSER_OPTIONAL(c_parse_ident(state, &name));
 
     if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok))) {
         if (name != nullptr) {
@@ -2270,7 +2508,7 @@ c_parse_record(ParserState *state, C_Ast_TypeKind struct_or_union_kind, C_Ast_Ty
     ASSERT_OK(darr_new_cap_in_T(C_Ast_Decl, 16, &state->ast_alloc, &fields));
 
     C_Ast_Decl *field;
-    while (IS_OK(c_parse_declaration(state, &field))) {
+    while (IS_OK(PARSER_OPTIONAL(c_parse_declaration(state, &field)))) {
         darr_push(&fields, field);
         allocator_free(&state->ast_alloc, (void **)&field);
     }
@@ -2314,33 +2552,35 @@ c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty) {
     C_Token *tok = parser_peek(state);
 
     if (tok->kind == C_TOKEN_KIND_KEYWORD) {
+        if (!c_token_is_type_name_beginning(state->env, tok)) {
+            parser_error_expected(state, S("type-name"));
+            PARSING_NONE(state, &prev);
+        }
         if (!c_keyword_is_type_specifier(tok->t_keyword.keyword_kind)) {
             if (tok->t_keyword.keyword_kind != C_KEYWORD_STRUCT && tok->t_keyword.keyword_kind != C_KEYWORD_UNION) {
                 PARSING_NONE(state, &prev);
             }
 
             // struct-or-union-specifier
-            if (IS_OK(c_parse_t_keyword_kind(state, C_KEYWORD_STRUCT, &tok))) {
+            if (IS_OK(PARSER_OPTIONAL(c_parse_t_keyword_kind(state, C_KEYWORD_STRUCT, &tok)))) {
                 if (IS_ERR(c_parse_record(state, C_AST_TYPE_KIND_STRUCT, (C_Ast_TypeRecord **)out_ty))) {
                     PARSING_NONE(state, &prev);
                 }
             }
-            else if (IS_OK(c_parse_t_keyword_kind(state, C_KEYWORD_UNION, &tok))) {
+            else if (IS_OK(PARSER_OPTIONAL(c_parse_t_keyword_kind(state, C_KEYWORD_UNION, &tok)))) {
                 if (IS_ERR(c_parse_record(state, C_AST_TYPE_KIND_UNION, (C_Ast_TypeRecord **)out_ty))) {
                     PARSING_NONE(state, &prev);
                 }
             }
         } else {
-            parser_error_expected(state, S("type-name"));
-            PARSING_NONE(state, &prev);
-            // C_Ast_Ident *ident = nullptr;
-            // make_node(state, &ident, IDENT, 
-            //     .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind),
-            //     .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
-            // make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
-            //     .ident = ident,
-            //     .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
-            // parser_advance(state);
+            C_Ast_Ident *ident = nullptr;
+            make_node(state, &ident, IDENT, 
+                .name = c_keyword_str_from_kind(tok->t_keyword.keyword_kind),
+                .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+            make_node_type(state, (C_Ast_TypeIdent **)out_ty, IDENT, 
+                .ident = ident,
+                .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+            parser_advance(state);
         }
     } else if (tok->kind == C_TOKEN_KIND_IDENT) {
         if (!c_token_is_type_name_beginning(state->env, tok)) {
@@ -2374,7 +2614,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
     C_Token *tok;
     auto prev = parser_save(state);
 
-    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok)))) {
         make_node_decl(state, (C_Ast_Decl **)out_decl, EMPTY, 
                 .span = parser_span_from_save(state, &prev),
             );
@@ -2382,7 +2622,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
     }
 
     C_Ast_DeclKind decl_kind = C_AST_DECL_KIND_VARIABLE;
-    if (IS_OK(c_parse_t_keyword_kind(state, C_KEYWORD_TYPEDEF, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_keyword_kind(state, C_KEYWORD_TYPEDEF, &tok)))) {
         decl_kind = C_AST_DECL_KIND_TYPEDEF;
     }
     
@@ -2393,7 +2633,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         // parser_error(state, S("Expected type-specifier"));
         PARSING_NONE(state, &prev);
     }
-    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_SEMI_COLON, &tok)))) {
         make_node_decl(state, (C_Ast_DeclType **)out_decl, TYPE_DECL, 
                 .ty = ty,
                 .span = parser_span_from_save(state, &prev),
@@ -2420,14 +2660,14 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
 
     auto save_br = parser_save(state);
     if (decl_ty->ty_kind == C_AST_TYPE_KIND_FUNCTION && 
-        IS_OK(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok))) 
+        IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok)))) 
     {
 
         C_Ast_StmtCompound *body = nullptr;
 
         darr_T(C_Ast_BlockItem*) items = nullptr; 
         C_SymbolTable scope = nullptr;
-        c_parse_block(state, &scope, &items);
+        PARSER_TRY(c_parse_block(state, &scope, &items));
 
         if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
             PARSING_NONE(state, &prev);
@@ -2457,7 +2697,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
             );
         PARSING_OK(state);
 
-    } else if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok))) {
+    } else if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok)))) {
         PARSER_TRY(c_parse_expr_assign(state, &initializer));
     }
 
@@ -2467,7 +2707,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
         .initializer = initializer,
     };
 
-    if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
         darr_new_cap_in_T(C_Ast_InitDeclarator, 3, &state->ast_alloc, &others);
         while (true) {
             C_Ast_Expr *initializer = nullptr;
@@ -2478,7 +2718,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
                 PARSING_NONE(state, &prev);
             }
 
-            if (IS_OK(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok))) {
+            if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_EQUAL, &tok)))) {
                 PARSER_TRY(c_parse_expr_assign(state, &initializer));
             }
 
@@ -2493,7 +2733,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
                 .initializer = initializer,
             });
 
-            if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok))) {
+            if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
                 break;
             }
         }
@@ -2574,7 +2814,9 @@ c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit
             PARSING_NONE(state, &prev);
         }
         if (state->collect_symbols) {
-            c_scope_collect_symbols_decl(&global_scope, decl);
+            if (!c_parser_scope_collect_symbols_decl(state, &global_scope, decl)) {
+                PARSING_NONE(state, &prev);
+            }
         }
 
         *darr_get_unchecked_T(C_Ast_Decl *, decls, darr_len(decls)) = decl;

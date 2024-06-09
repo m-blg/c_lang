@@ -116,7 +116,7 @@ c_translation_unit_parse(C_TranslationUnitData *self) {
 
     _translation_unit_parser_init(self, &pstate);
 
-    if (IS_ERR(c_parse_translation_unit(&pstate, &self->tr_unit))) {
+        if (IS_ERR(c_parse_translation_unit(&pstate, &self->tr_unit))) {
         parser_error_print(&pstate);
         _translation_unit_parser_deinit(&pstate);
         return false;

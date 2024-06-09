@@ -139,7 +139,8 @@ struct_def(C_TokenStringLiteral, {
     str_t str;
 })
 struct_def(C_TokenCharLiteral, {
-    rune_t rune;
+    str_t char_str;
+    // rune_t rune;
 })
 struct_def(C_TokenNumLiteral, {
     str_t lit; // in case of float may contain '.'
@@ -307,6 +308,7 @@ struct_def(LexerState, {
     slice_T(str_t) include_filepaths;
     bool do_preprocessing;
     bool in_macro;
+    bool do_escape_in_literals;
     hashmap_T(str_t, darr_T(C_Token)) pp_defs;
     // darr_T(C_PP_Directive) pp_if_stack; // conditions pp-directives
     usize_t pp_if_depth; // conditions pp-directives
@@ -683,8 +685,10 @@ lexer_advance_rune_no_escape(LexerState *state) {
     }
     if (r == '\n') {
         state->line += 1;
-    } 
-    state->col += 1;
+        state->col = 1;
+    } else {
+        state->col += 1;
+    }
 
     SWAP(state->rest, state->cache_rest);
     auto e = str_next_rune(lexer_rest(state), &state->cache_cur_rune, &state->cache_rest);
@@ -709,8 +713,10 @@ lexer_advance_rune(LexerState *state) {
     }
     if (r == '\n') {
         state->line += 1;
+        state->col = 1;
+    } else {
+        state->col += 1;
     }
-    state->col += 1;
 
     SWAP(state->rest, state->cache_rest);
     auto e = str_next_rune(lexer_rest(state), &state->cache_cur_rune, &state->cache_rest);
@@ -984,6 +990,52 @@ out:
     LEXING_OK(state);
 }
 
+// LexingError
+// lex_char_literal(LexerState *state, C_Token *out_token) {
+//     rune_t r = 0;
+//     auto prev = lexer_save(state);
+//     r = lexer_advance_rune(state);
+//     if (r != '\'') {
+//         LEXING_NONE(state, &prev);
+//     }
+//     rune_t content = 0;
+
+//     r = lexer_peek_rune(state);
+//     switch (r)
+//     {
+//     case '\n':
+//     case '\0':
+//         lexer_error(state, S("Character literal was not terminated")); 
+//         LEXING_NONE(state, &prev);
+//         break;
+//     case '\\':
+//         if (IS_ERR(lex_escape_sequence(state, &content))) {
+//             LEXING_NONE(state, &prev);
+//         }
+//         break;
+//     case '\'':
+//         lexer_error(state, S("Empty character literal")); 
+//         LEXING_NONE(state, &prev);
+//         break;
+    
+//     default:
+//         content = lexer_advance_rune(state);
+//         break;
+//     }
+//     if (lexer_advance_rune(state) != '\'') {
+//         lexer_error(state, S("Multicharacter character literal")); 
+//         LEXING_NONE(state, &prev);
+//     }
+
+//     *out_token = (C_Token) {
+//         .kind = C_TOKEN_KIND_CHAR,
+//         .span = span_from_lexer_savepoint(state, &prev),
+//     };
+//     out_token->t_char_lit.rune = content;
+
+//     LEXING_OK(state);   
+// }
+
 LexingError
 lex_char_literal(LexerState *state, C_Token *out_token) {
     rune_t r = 0;
@@ -992,42 +1044,61 @@ lex_char_literal(LexerState *state, C_Token *out_token) {
     if (r != '\'') {
         LEXING_NONE(state, &prev);
     }
-    rune_t content = 0;
+    str_t content = lexer_rest(state);
 
-    r = lexer_peek_rune(state);
-    switch (r)
-    {
-    case '\n':
-    case '\0':
-        lexer_error(state, S("Character literal was not terminated")); 
-        LEXING_NONE(state, &prev);
-        break;
-    case '\\':
-        if (IS_ERR(lex_escape_sequence(state, &content))) {
+    string_reset(state->string_batch);
+
+    while (true) {
+        r = lexer_peek_rune(state);
+        switch (r)
+        {
+        case '\n':
+        case '\0':
+            // auto last = lexer_save(state);
+            lexer_error(state, S("Character literal was not terminated")); 
+                // span_from_lexer_savepoints(state, &prev, &last));
             LEXING_NONE(state, &prev);
+            break;
+        case '\\':
+            if (state->do_escape_in_literals) {
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
+                    str_from_begin_end(content, lexer_rest(state))));
+                if (IS_ERR(lex_escape_sequence(state, &r))) {
+                    LEXING_NONE(state, &prev);
+                }
+                LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
+                content = lexer_rest(state);
+            } else {
+                lexer_advance_rune(state);
+            }
+            break;
+        case '\'':
+            LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
+                str_from_begin_end(content, lexer_rest(state))));
+            // content = str_from_ptr_len(prev.rest.ptr + 1, (str_len(prev.rest)-1) - (str_len(state->rest) + 1));
+            lexer_advance_rune(state);
+            goto end;
+            break;
+        
+        default:
+            lexer_advance_rune(state);
+            break;
         }
-        break;
-    case '\'':
-        lexer_error(state, S("Empty character literal")); 
-        LEXING_NONE(state, &prev);
-        break;
-    
-    default:
-        content = lexer_advance_rune(state);
-        break;
     }
-    if (lexer_advance_rune(state) != '\'') {
-        lexer_error(state, S("Multicharacter character literal")); 
-        LEXING_NONE(state, &prev);
-    }
+end:
 
+    lexer_intern_batch(state, &content);
+    auto last = lexer_save(state);
     *out_token = (C_Token) {
         .kind = C_TOKEN_KIND_CHAR,
-        .span = span_from_lexer_savepoint(state, &prev),
-    };
-    out_token->t_char_lit.rune = content;
+        .span = span_from_lexer_savepoints(state, &prev, &last),
 
-    LEXING_OK(state);   
+        .t_char_lit = (C_TokenCharLiteral) {
+            .char_str = content,
+        },
+    };
+
+    LEXING_OK(state);
 }
 
 /// @brief lexes string literal token
@@ -1058,13 +1129,17 @@ lex_string_literal(LexerState *state, C_Token *out_token) {
             LEXING_NONE(state, &prev);
             break;
         case '\\':
-            LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
-                str_from_begin_end(content, lexer_rest(state))));
-            if (IS_ERR(lex_escape_sequence(state, &r))) {
-                LEXING_NONE(state, &prev);
+            if (state->do_escape_in_literals) {
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
+                    str_from_begin_end(content, lexer_rest(state))));
+                if (IS_ERR(lex_escape_sequence(state, &r))) {
+                    LEXING_NONE(state, &prev);
+                }
+                LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
+                content = lexer_rest(state);
+            } else {
+                lexer_advance_rune(state);
             }
-            LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
-            content = lexer_rest(state);
             break;
         case '"':
             LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
@@ -1085,10 +1160,12 @@ end:
     auto last = lexer_save(state);
     *out_token = (C_Token) {
         .kind = C_TOKEN_KIND_STRING,
-
         .span = span_from_lexer_savepoints(state, &prev, &last),
+
+        .t_str_lit = (C_TokenStringLiteral) {
+            .str = content,
+        }
     };
-    out_token->t_str_lit.str = content;
 
     LEXING_OK(state);
 }
@@ -1298,7 +1375,7 @@ lex_number(LexerState *state, C_Token *out_token) {
             if (rune_is_number_end(r) || r == 'u' || r == 'U' || r == 'l' || r == 'L') {
                 base = 10;
                 char_set = ASCII_SET_DEC_DIGIT;
-                string_append_rune(string_batch, 0);
+                string_append_rune(string_batch, '0');
             } else if (r == '.') {
                 unimplemented();
             } else if (r == 'x') {

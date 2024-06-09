@@ -106,13 +106,23 @@ enum_def(C_KeywordKind,
                     kind == C_KEYWORD_DOUBLE ||\
                     kind == C_KEYWORD_SIGNED ||\
                     kind == C_KEYWORD_UNSIGNED ||\
+                    kind == C_KEYWORD_BOOL ||\
                     kind == C_KEYWORD__BOOL ||\
                     kind == C_KEYWORD__COMPLEX ||\
                     kind == C_KEYWORD__IMAGINARY)\
 
+#define c_keyword_is_type_name_beginning(kind) ( \
+                    c_keyword_is_type_specifier(kind) || \
+                    kind == C_KEYWORD_STRUCT || \
+                    kind == C_KEYWORD_UNION || \
+                    kind == C_KEYWORD_ENUM)
+
 #define c_keyword_is_control(kind) (\
                     kind == C_KEYWORD_IF ||\
+                    kind == C_KEYWORD_ELSE ||\
                     kind == C_KEYWORD_SWITCH ||\
+                    kind == C_KEYWORD_CASE ||\
+                    kind == C_KEYWORD_DEFAULT ||\
                     kind == C_KEYWORD_FOR ||\
                     kind == C_KEYWORD_WHILE ||\
                     kind == C_KEYWORD_DO ||\
