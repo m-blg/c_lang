@@ -329,7 +329,7 @@ Test(Suite1, at_directives, .disabled=true) {
 
 
         C_Token *tok = nullptr;
-        C_Ast_AtDirective *at_dir = nullptr;
+        EC_Ast_AtDirective *at_dir = nullptr;
         // C_Ast_Type *ty = nullptr;
 
         ParserState pstate;

@@ -50,6 +50,7 @@ enum_def(C_Ast_NodeKind,
 
 #ifdef EXTENDED_C
     C_AST_NODE_KIND_AT_DIRECTIVE,
+    C_AST_NODE_KIND_EC_TR_UNIT,
 #endif // EXTENDED_C
     
 )
@@ -361,8 +362,8 @@ enum_def(C_Ast_DeclKind,
 
 #define C_AST_NODE_DECL_BASE \
     C_AST_NODE_BASE \
-    C_Ast_DeclKind decl_kind; \
-    darr_T(C_Ast_AtDirective *) at_directives;
+    C_Ast_DeclKind decl_kind;
+    // darr_T(EC_Ast_AtDirective *) at_directives;
 
 struct_def(C_Ast_DeclType, {
     C_AST_NODE_DECL_BASE
@@ -379,7 +380,7 @@ struct_def(C_Ast_DeclFnDef, {
     C_AST_NODE_DECL_BASE
     C_Ast_Type *ty;
     C_Ast_Ident *name;
-    C_Ast_StmtCompound NLB(*)body;
+    C_Ast_StmtCompound *body;
 })
 struct_def(C_Ast_DeclTypedef, {
     C_AST_NODE_DECL_BASE
@@ -520,8 +521,14 @@ struct_def(C_Ast_StmtReturn, {
 struct_def(C_Ast_StmtCompound, {
     C_AST_NODE_STMT_BASE
 
-    C_SymbolTable scope;
-    darr_T(C_Ast_BlockItem) items;
+    union {
+    struct{
+        C_SymbolTable scope;
+        darr_T(C_Ast_BlockItem) items;
+    };
+        slice_T(C_Token) postponed;
+    };
+    bool is_postponed;
 })
 
 
@@ -572,11 +579,28 @@ struct_def(C_Ast_TranslationUnit, {
 
 
 #ifdef EXTENDED_C
-struct_def(C_Ast_AtDirective, {
+struct_def(EC_Ast_AtDirective, {
     C_AST_NODE_BASE
 
     C_Ast_Ident *name;
-    darr_T(C_Ast_Expr *) params;
+    darr_T(C_Ast_Node *) args; // ident or literal
+})
+
+struct_def(EC_Ast_TrUnitItem, {
+    union {
+    struct {
+        C_AST_NODE_BASE
+    };
+        EC_Ast_AtDirective at_directive;
+        C_Ast_Decl decl;
+    };
+    
+})
+
+struct_def(EC_Ast_TranslationUnit, {
+    C_AST_NODE_BASE
+
+    darr_T(EC_Ast_TrUnitItem *) items;
 })
 #endif // EXTENDED_C
 
@@ -594,7 +618,7 @@ struct_def(C_Ast_Node, {
         C_Ast_Decl decl;
         C_Ast_TranslationUnit tr_unit;
     #ifdef EXTENDED_C
-        C_Ast_AtDirective at_directive;
+        EC_Ast_AtDirective at_directive;
     #endif // EXTENDED_C
     };
 })
@@ -1316,6 +1340,16 @@ c_token_is_type_name_beginning(C_Environment env, C_Token *tok) {
     }
 }
 
+ParsingError
+c_parse_expr_op_infix_prec_rb(ParserState *state, C_Ast_ExprBinOp **out_binop, u8_t max_precedence, bool is_strict_precedence);
+ParsingError
+c_parse_expr_op_prefix_prec_rb(ParserState *state, C_Ast_ExprUnOp **out_unop, u8_t max_precedence, bool is_strict_precedence);
+ParsingError
+c_parse_expr_op_postfix_prec_rb(ParserState *state, C_Ast_ExprUnOp **out_unop, u8_t max_precedence);
+ParsingError
+c_parse_expr_op_tern_cond_prec_rb(ParserState *state, C_Ast_ExprCondOp **out_tern, u8_t max_precedence, bool is_strict_precedence);
+
+
 /// @brief parses binop if its precedence < max_precedence or 
 ///   (if is_strict_precedence is false) precedence == max_precedence && its associativity is right-to-left
 /// @param state 
@@ -1431,6 +1465,8 @@ c_parse_expr_cond(ParserState *state, C_Ast_Expr **out_expr);
 #define c_parse_expr_constant c_parse_expr_cond
 ParsingError
 c_parse_expr(ParserState *state, C_Ast_Expr **out_expr);
+ParsingError
+_c_parse_expr(ParserState *state, C_Ast_Expr **out_expr, u8_t max_precedence, C_ExprFlags flags);
 
 ///
 /// x + y * z 
@@ -2552,10 +2588,10 @@ c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty) {
     C_Token *tok = parser_peek(state);
 
     if (tok->kind == C_TOKEN_KIND_KEYWORD) {
-        if (!c_token_is_type_name_beginning(state->env, tok)) {
-            parser_error_expected(state, S("type-name"));
-            PARSING_NONE(state, &prev);
-        }
+        // if (!c_token_is_type_name_beginning(state->env, tok)) {
+        //     parser_error_expected(state, S("type-name"));
+        //     PARSING_NONE(state, &prev);
+        // }
         if (!c_keyword_is_type_specifier(tok->t_keyword.keyword_kind)) {
             if (tok->t_keyword.keyword_kind != C_KEYWORD_STRUCT && tok->t_keyword.keyword_kind != C_KEYWORD_UNION) {
                 PARSING_NONE(state, &prev);
@@ -2583,10 +2619,10 @@ c_parse_type_specifier(ParserState *state, C_Ast_Type **out_ty) {
             parser_advance(state);
         }
     } else if (tok->kind == C_TOKEN_KIND_IDENT) {
-        if (!c_token_is_type_name_beginning(state->env, tok)) {
-            parser_error_expected(state, S("type-name"));
-            PARSING_NONE(state, &prev);
-        }
+        // if (!c_token_is_type_name_beginning(state->env, tok)) {
+        //     parser_error_expected(state, S("type-name"));
+        //     PARSING_NONE(state, &prev);
+        // }
 
         C_Ast_Ident *ident = nullptr;
         make_node(state, &ident, IDENT, 
@@ -2662,22 +2698,62 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
     if (decl_ty->ty_kind == C_AST_TYPE_KIND_FUNCTION && 
         IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_BRACE, &tok)))) 
     {
-
         C_Ast_StmtCompound *body = nullptr;
 
         darr_T(C_Ast_BlockItem*) items = nullptr; 
         C_SymbolTable scope = nullptr;
-        PARSER_TRY(c_parse_block(state, &scope, &items));
-
-        if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
-            PARSING_NONE(state, &prev);
+        if (state->mode == C_PARSING_MODE_POSTPONED) {
+            usize_t depth = 1,
+                    from = state->cur, to = state->cur;
+            while (true)
+            {
+                tok = parser_advance(state);
+                switch (tok->kind)
+                {
+                case C_TOKEN_KIND_EOF: {
+                    parser_error_expected(state, S("matching '}'"));
+                    PARSING_NONE(state, &prev);
+                    break;
+                }
+                case C_TOKEN_KIND_PUNCT: {
+                    if (tok->t_punct.punct_kind == C_PUNCT_LEFT_BRACE) {
+                        depth += 1;
+                    } else if (tok->t_punct.punct_kind == C_PUNCT_RIGHT_BRACE) {
+                        depth -= 1;
+                        if (depth == 0) {
+                            goto out;
+                        }
+                    } else {
+                        to = state->cur;
+                        continue;
+                    }
+                    break;
+                }
+                
+                default:
+                    to = state->cur;
+                    continue;
+                    break;
+                }
+            }
+            out:
+            make_node_stmt(state, (C_Ast_StmtCompound **)&body, COMPOUND, 
+                .postponed = slice_subslice(&state->tokens, from, to),
+                .is_postponed = true,
+                .span = parser_span_from_save(state, &save_br));
+        } else {
+            PARSER_TRY(c_parse_block(state, &scope, &items));
+            if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_BRACE, &tok))) {
+                PARSING_NONE(state, &prev);
+            }
+            make_node_stmt(state, (C_Ast_StmtCompound **)&body, COMPOUND, 
+                .items = items,
+                .scope = scope,
+                .is_postponed = false,
+                .span = parser_span_from_save(state, &save_br));
         }
         
 
-        make_node_stmt(state, (C_Ast_StmtCompound **)&body, COMPOUND, 
-            .items = items,
-            .scope = scope,
-            .span = parser_span_from_save(state, &save_br));
 
         // if (parser_peek(state)->kind != C_TOKEN_KIND_PUNCT || 
         //     parser_peek(state)->t_punct.punct_kind != C_PUNCT_RIGHT_BRACE) 
@@ -2713,7 +2789,7 @@ c_parse_declaration(ParserState *state, C_Ast_Decl **out_decl) {
             C_Ast_Expr *initializer = nullptr;
             // init-declarator
             if (IS_ERR(c_parse_declarator(state, &decl_ty, &decl_ty_leaf, &decl_name))) {
-                parser_error(state, S("Expected type-specifier"));
+                parser_error_expected(state, S("type-specifier"));
                 darr_free(&others);
                 PARSING_NONE(state, &prev);
             }
@@ -2837,7 +2913,7 @@ c_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit
 #ifdef EXTENDED_C
 
 ParsingError
-ec_parse_at_directive(ParserState *state, C_Ast_AtDirective **out_at_dir) {
+ec_parse_at_directive(ParserState *state, EC_Ast_AtDirective **out_at_dir) {
     auto prev = parser_save(state);
     // unimplemented();
 
@@ -2857,18 +2933,62 @@ ec_parse_at_directive(ParserState *state, C_Ast_AtDirective **out_at_dir) {
     if (IS_ERR(c_parse_ident(state, &dir_name))) {
         PARSING_NONE(state, &prev);
     }
-    if (parser_peek_punct_kind(state, C_PUNCT_LEFT_PAREN)) {
-        unimplemented();
-        // parser_set_opts(state, C_PARSER_OPT_NO_NEW_LINE_SKIP)
+
+    darr_t args = nullptr;
+    if (IS_OK(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_LEFT_PAREN, &tok)))) {
+
+        PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Node *, 16, &state->ast_alloc, &args));
+
+        C_Ast_Node *arg = nullptr;
+        while (true) {
+            tok = parser_peek(state);
+            if (tok->kind == C_TOKEN_KIND_IDENT) {
+                PARSER_TRY(c_parse_ident(state, (C_Ast_Ident **)&arg));
+            } else if (tok->kind == C_TOKEN_KIND_STRING) {
+                C_Ast_LiteralString *lit;
+                make_node_lit(state, &lit, STRING, 
+                    .t_str_lit = &tok->t_str_lit,
+                    .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+                arg = (C_Ast_Node *)lit;
+                parser_advance(state);
+            } else if (tok->kind == C_TOKEN_KIND_CHAR) {
+                C_Ast_LiteralChar *lit;
+                make_node_lit(state, &lit, CHAR, 
+                    .t_char_lit = &tok->t_char_lit,
+                    .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+                arg = (C_Ast_Node *)lit;
+                parser_advance(state);
+            } else if (tok->kind == C_TOKEN_KIND_NUMBER) {
+                C_Ast_LiteralNumber *lit;
+                make_node_lit(state, &lit, NUMBER, 
+                    .t_num_lit = &tok->t_num_lit,
+                    .span = (C_ParserSpan) {.b_tok = state->cur, .e_tok = state->cur + 1});
+                arg = (C_Ast_Node *)lit;
+                parser_advance(state);
+            } else {
+                parser_error_expected(state, S("ident or literal"));
+                PARSING_NONE(state, &prev);
+            }
+            PARSER_ALLOC_HANDLE(darr_push(&args, (void **)&arg));
+
+            if (IS_ERR(PARSER_OPTIONAL(c_parse_t_punct_kind(state, C_PUNCT_COMMA, &tok)))) {
+                break;
+            }
+        }
+        if (IS_ERR(c_parse_t_punct_kind(state, C_PUNCT_RIGHT_PAREN, &tok))) {
+            PARSING_NONE(state, &prev);
+        }
+
     }
     if (!c_token_was_new_line(parser_peek(state))) {
-        parser_error_expected(state, S("@ macro was not terminated with '\\n'"));
+        parser_error(state, S("@ macro was not terminated with '\\n'"));
         PARSING_NONE(state, &prev);
     }
 
 
     make_node(state, out_at_dir, AT_DIRECTIVE, 
             .name = dir_name,
+            .args = args,
             .span = parser_span_from_save(state, &prev),
         );
     // parser_set_opts(state, C_PARSER_OPT_NO_NEW_LINE_SKIP)
@@ -2877,55 +2997,47 @@ ec_parse_at_directive(ParserState *state, C_Ast_AtDirective **out_at_dir) {
 }
 
 ParsingError
-ec_parse_translation_unit(ParserState *state, C_Ast_TranslationUnit **out_tr_unit) {
+ec_parse_translation_unit(ParserState *state, EC_Ast_TranslationUnit **out_tr_unit) {
     auto prev = parser_save(state);
 
-    darr_T(C_Ast_AtDirective *) cur_at_dirs;
-    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_AtDirective *, 4, &state->ast_alloc, &cur_at_dirs));
-
-    darr_t decls;
+    darr_t tr_unit_items;
     // works with arena reallocations
-    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_Decl *, 16, &state->ast_alloc, &decls));
+    PARSER_ALLOC_HANDLE(darr_new_cap_in_T(EC_Ast_TrUnitItem *, 16, &state->ast_alloc, &tr_unit_items));
 
-    C_Ast_Decl *decl = nullptr;
-    C_Ast_AtDirective *dir = nullptr;
+    EC_Ast_TrUnitItem *item = nullptr;
     while (parser_peek(state)->kind != C_TOKEN_KIND_EOF) {
+        PARSER_ALLOC_HANDLE(darr_reserve_cap(&tr_unit_items, 1));
         if (parser_peek_punct_kind(state, C_PUNCT_AT)) {
-            if (IS_ERR(ec_parse_at_directive(state, &dir))) {
+            if (IS_ERR(ec_parse_at_directive(state, (EC_Ast_AtDirective **)&item))) {
                 PARSING_NONE(state, &prev);
             }
-            PARSER_ALLOC_HANDLE(darr_push(&cur_at_dirs, &dir));
-            continue;
-        }
-
-        PARSER_ALLOC_HANDLE(darr_reserve_cap(&decls, 1));
-        if (IS_ERR(c_parse_declaration(state, &decl))) {
+        } else if (IS_ERR(c_parse_declaration(state, (C_Ast_Decl **)&item))) {
             PARSING_NONE(state, &prev);
         }
 
-        *darr_get_unchecked_T(C_Ast_Decl *, decls, darr_len(decls)) = decl;
-        decls->len += 1;
-        if (darr_len(cur_at_dirs) > 0) {
-            if (decl->decl_kind == C_AST_DECL_KIND_EMPTY) {
-                darr_free(&cur_at_dirs);
-                parser_error(state, S("stray @ directives"));
-                PARSING_NONE(state, &prev);
-            }
-            decl->at_directives = cur_at_dirs;
-            PARSER_ALLOC_HANDLE(darr_new_cap_in_T(C_Ast_AtDirective *, 4, &state->ast_alloc, &cur_at_dirs));
-        }
+        *darr_get_unchecked_T(EC_Ast_TrUnitItem *, tr_unit_items, darr_len(tr_unit_items)) = item;
+        tr_unit_items->len += 1;
+        // if (darr_len(cur_at_dirs) > 0) {
+        //     if (decl->decl_kind == C_AST_DECL_KIND_EMPTY) {
+        //         darr_free(&cur_at_dirs);
+        //         parser_error(state, S("stray @ directives"));
+        //         PARSING_NONE(state, &prev);
+        //     }
+        //     decl->at_directives = cur_at_dirs;
+        //     PARSER_ALLOC_HANDLE(darr_new_cap_in_T(EC_Ast_AtDirective *, 4, &state->ast_alloc, &cur_at_dirs));
+        // }
 
-        arena_free(state->ast_arena, (void **)&decl);
+        // arena_free(state->ast_arena, (void **)&decl);
     }
 
-    if (darr_len(cur_at_dirs) > 0) {
-        darr_free(&cur_at_dirs);
-        parser_error(state, S("stray @ directives"));
-        PARSING_NONE(state, &prev);
-    } 
+    // if (darr_len(cur_at_dirs) > 0) { 
+    //     darr_free(&cur_at_dirs);
+    //     parser_error(state, S("stray @ directives"));
+    //     PARSING_NONE(state, &prev);
+    // } 
 
-    make_node(state, out_tr_unit, TR_UNIT, 
-            .decls = decls,
+    make_node(state, out_tr_unit, EC_TR_UNIT, 
+            .items = tr_unit_items,
             .span = parser_span_from_save(state, &prev),
         );
 

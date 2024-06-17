@@ -62,8 +62,11 @@ void
 test2() {
     // str_t text = S("\"text\" / \"more text\" \0");
     // str_t text = S("\"text\" , ... : _ident  /** \"more text\" **/ \0");
+    // str_t text = S(
+    //     "... ,, <>"
+    //     );
     str_t text = S(
-        "... ,, <>"
+        "int x = y + 3;"
         );
     LexerState state;
     lexer_init_default(&state, text, S("<file>"));
@@ -105,13 +108,33 @@ test3() {
 }
 void
 test4() {
+    // str_t text = S(
+    //     "#define A a\n"
+    //     "#define B A\\\n b\n"
+    //     "#define C A B\n"
+    //     "A B C;"
+    //     "#define D A B C\n"
+    //     "D"
+    //     );
+    // str_t text = S(
+    //     "#define A a\n"
+    //     "#define B A b\n"
+    //     "#define C B c\n"
+    //     "#ifdef C\n"
+    //     "#define D d\n"
+    //     "#else\n"
+    //     "#define E\n"
+    //     "#endif\n"
+    //     "C D E"
+    //     );
     str_t text = S(
         "#define A a\n"
-        "#define B A\\\n b\n"
-        "#define C A B\n"
-        "A B C;"
-        "#define D A B C\n"
-        "D"
+        "#define B A b\n"
+        "#define C B c\n"
+        "#ifdef C\n"
+        "#define D d\n"
+        "#endif\n"
+        "C D"
         );
     LexerState state;
     lexer_init_default(&state, text, S("<file>"));
@@ -189,8 +212,8 @@ main() {
     // test1();
     // test2();
     // test3();
-    // test4();
+    test4();
     // test5();
-    test6();
+    // test6();
     // test7();
 }

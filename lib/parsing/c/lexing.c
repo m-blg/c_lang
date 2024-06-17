@@ -11,6 +11,9 @@
     TYPE_LIST_ENTRY(TU_FileData), \
     TYPE_LIST_ENTRY(C_Symbol), \
     TYPE_LIST_ENTRY(C_SymbolData), \
+    TYPE_LIST_ENTRY(EC_ProcMacroData), \
+    TYPE_LIST_ENTRY(hashmap_t), \
+    TYPE_LIST_ENTRY(bool), \
 
 
 #include "core/string.h"
@@ -38,12 +41,25 @@ struct_def(C_PathName, {
 struct_def(C_SymbolData, {
     C_Ast_Node *node;
 
-    darr_T(C_Symbol) deps; // symbols this symbol depends on 
-    darr_T(C_Symbol) forward_deps; // symbols that depend on this one
+    hashset_T(C_Symbol) deps; // symbols this symbol depends on 
+    hashset_T(C_Symbol) f_deps; // symbols that depend on this one
+    usize_t in_deg;
 
-#ifdef EXTENDED_C
-    ProcMacroError (*macro_compiled_sym)(C_Ast_Node *, C_Ast_Node **);
-#endif // EXTENDED_C
+
+// #ifdef EXTENDED_C
+//     ProcMacroError (*macro_compiled_sym)(C_Ast_Node *, C_Ast_Node **);
+// #endif // EXTENDED_C
+})
+
+enum_def(EC_ProcMacroKind,
+    EC_PROC_MACRO_KIND_TRANSFORM,
+    EC_PROC_MACRO_KIND_DERIVE,
+    )
+
+struct_def(EC_ProcMacroData, {
+    EC_ProcMacroKind kind;
+    str_t symbol_name;
+    void *symbol;
 })
 
 
@@ -65,6 +81,23 @@ struct_def(C_SymbolData, {
 #define C_Symbol_set str_t_set
 #define C_Symbol_hash str_t_hash
 
+#define EC_ProcMacroData_fmt nullptr
+#define EC_ProcMacroData_dbg_fmt nullptr
+#define EC_ProcMacroData_eq nullptr
+#define EC_ProcMacroData_set nullptr
+#define EC_ProcMacroData_hash nullptr
+
+#define hashmap_t_fmt nullptr
+#define hashmap_t_dbg_fmt nullptr
+#define hashmap_t_eq nullptr
+#define hashmap_t_set nullptr
+#define hashmap_t_hash nullptr
+
+#define bool_fmt nullptr
+#define bool_dbg_fmt nullptr
+#define bool_eq nullptr
+#define bool_set nullptr
+#define bool_hash nullptr
 
 #define CORE_IMPL
 #include "core/string.h"
@@ -432,6 +465,8 @@ span_from_lexer_savepoint(LexerState *state,
         .e_byte_offset = (uintptr_t)state->rest.ptr - (uintptr_t)state->text.ptr,
         .e_line = state->line,
         .e_col = state->col,
+
+        .file_path = state->file_path,
     };
 }
 INLINE
@@ -446,6 +481,8 @@ span_from_lexer_savepoints(LexerState *state,
         .e_byte_offset = (uintptr_t)end->rest.ptr - (uintptr_t)state->text.ptr,
         .e_line = end->line,
         .e_col = end->col,
+
+        .file_path = state->file_path,
     };
 }
 INLINE
@@ -459,9 +496,13 @@ span_from_lexer_pos(Pos *begin, Pos *end)
         .e_byte_offset = end->byte_offset,
         .e_line = end->line,
         .e_col = end->col,
+
+        .file_path = begin->file_path,
     };
 }
 
+rune_t
+lexer_advance_rune_no_escape(LexerState *state);
 void
 lexer_init_cache(LexerState *self) {
     if (str_len(self->text) == 0) {
@@ -474,6 +515,17 @@ lexer_init_cache(LexerState *self) {
         self->utf8_error_handler(e, lexer_pos(self), S(""), nullptr);
         return;
     }
+
+    do {
+        if (self->cache_cur_rune == '\\') {
+            if (str_len(self->cache_rest) > 0 && *str_get_byte(self->cache_rest, 0) == '\n') {
+                lexer_advance_rune_no_escape(self);
+                lexer_advance_rune_no_escape(self);
+                continue;
+            }
+        }
+        break;
+    } while(1);
 }
  
 
@@ -733,11 +785,8 @@ lexer_advance_rune(LexerState *state) {
 
     do {
         if (state->cache_cur_rune == '\\') {
-            auto prev = lexer_save(state);
-            lexer_advance_rune_no_escape(state);
-            if (lexer_peek_rune(state) != '\n') {
-                lexer_restore(state, &prev);
-            } else {
+            if (str_len(state->cache_rest) > 0 && *str_get_byte(state->cache_rest, 0) == '\n') {
+                lexer_advance_rune_no_escape(state);
                 lexer_advance_rune_no_escape(state);
                 continue;
             }
@@ -990,6 +1039,59 @@ out:
     LEXING_OK(state);
 }
 
+LexingError
+lex_escape_sequence_raw(LexerState *state, str_t *out_seq) {
+    rune_t r = 0;
+    auto prev = lexer_save(state);
+    r = lexer_advance_rune(state);
+    if (r != '\\') {
+        LEXING_NONE(state, &prev);
+    }
+    switch (lexer_peek_rune(state))
+    {
+    #define entry(test, set) \
+    case test: \
+        *out_seq = S(set); \
+        goto out; \
+        break; \
+
+    entry('\'', "\\'")
+    entry('\"', "\\\"")
+    entry('?', "\\?")
+    entry('\\', "\\\\")
+    entry('a', "\\a")
+    entry('b', "\\b")
+    entry('f', "\\f")
+    entry('n', "\\n")
+    entry('r', "\\r")
+    entry('t', "\\t")
+    entry('v', "\\v")
+
+    #undef entry
+
+    case 'x':
+        unimplemented();
+        break;
+    case 'u':
+    case 'U':
+        unimplemented();
+        lexer_restore(state, &prev);
+        // TRY(lex_universal_char_name(state, out_rune));
+        LEXING_OK(state);
+        break;
+    
+    default:
+        lexer_error(state, S("unknown escape sequence"));
+        LEXING_NONE(state, &prev);
+        break;
+    }
+out:
+
+    lexer_advance_rune(state);
+
+    LEXING_OK(state);
+}
+
 // LexingError
 // lex_char_literal(LexerState *state, C_Token *out_token) {
 //     rune_t r = 0;
@@ -1069,7 +1171,13 @@ lex_char_literal(LexerState *state, C_Token *out_token) {
                 LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
                 content = lexer_rest(state);
             } else {
-                lexer_advance_rune(state);
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
+                    str_from_begin_end(content, lexer_rest(state))));
+                if (IS_ERR(lex_escape_sequence_raw(state, &content))) {
+                    LEXING_NONE(state, &prev);
+                }
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, content));
+                content = lexer_rest(state);
             }
             break;
         case '\'':
@@ -1138,7 +1246,13 @@ lex_string_literal(LexerState *state, C_Token *out_token) {
                 LEXER_ALLOC_HANDLE(string_append_rune(state->string_batch, r));
                 content = lexer_rest(state);
             } else {
-                lexer_advance_rune(state);
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, 
+                    str_from_begin_end(content, lexer_rest(state))));
+                if (IS_ERR(lex_escape_sequence_raw(state, &content))) {
+                    LEXING_NONE(state, &prev);
+                }
+                LEXER_ALLOC_HANDLE(string_append_str(state->string_batch, content));
+                content = lexer_rest(state);
             }
             break;
         case '"':
@@ -2381,6 +2495,56 @@ tokenize(LexerState *state, darr_T(C_Token) *out_tokens) {
 
 
 
+/// @return total_token_count
+usize_t
+_c_token_list_flatten_at(darr_T(C_Token) tokens, C_Token *dst) {
+    auto prev = dst;
+    for_in_range(i, 0, darr_len(tokens)) {
+        auto tok = darr_get_T(C_Token, tokens, i);
+        if (tok->kind == C_TOKEN_KIND_EXPAND) {
+            dst += _c_token_list_flatten_at(tok->t_expand.tokens, dst);
+        } else if (tok->kind == C_TOKEN_KIND_INCLUDE) {
+            dst += _c_token_list_flatten_at(tok->t_include.tokens, dst);
+        } else if (tok->kind == C_TOKEN_KIND_EOF || tok->kind == C_TOKEN_KIND_NEW_LINE) {
+            continue;
+        } else {
+            *dst = *tok;
+            dst += 1;
+        }
+    }
+
+    return dst - prev;
+} 
+
+AllocatorError
+c_token_list_flatten_in(darr_T(C_Token) tokens, usize_t token_count_upper_bound, 
+    Allocator *alloc, darr_T(C_Token) *out_tokens) 
+{
+    darr_t flat;
+    TRY(darr_new_cap_in_T(C_Token, token_count_upper_bound, alloc, &flat));
+
+    auto len =_c_token_list_flatten_at(tokens, darr_get_unchecked_T(C_Token, flat, 0));
+    flat->len = len+1;
+    *darr_get_iT(C_Token, flat, -1) = *darr_get_iT(C_Token, tokens, -1);
+    
+    *out_tokens = flat;
+
+    return ALLOCATOR_ERROR(OK);
+}
+
+// void
+// c_trans_unit_tokenize(str_t main_file_path, C_TranslationUnitData *out_self) {
+//     LexerState state;
+//     lexer_init_default(&state);
+//     Allocator string_arena_allocator = arena_allocator(state->string_arena);
+//     WITH_FILE(file_path, "r", file, {
+//         LEXER_ALLOC_HANDLE(file_read_full_str_in(file, &string_arena_allocator, &include_text));
+//     })
+//     hashmap_set(&state->file_data_table, &file_path, &(TU_FileData) {.text = include_text});
+// }
+
+
+#ifdef DBG_PRINT
 FmtError
 token_kind_dbg_fmt(C_TokenKind *kind, StringFormatter *fmt) {
 #define enum_item_case_fmt_write(item)\
@@ -2432,7 +2596,6 @@ print_token_by_span(C_Token *token, str_t text) {
 
 
 
-#ifdef DBG_PRINT
 FmtError
 span_dbg_fmt(C_LexerSpan *span, StringFormatter *fmt, void *_) {
     TRY(string_formatter_write_fmt(fmt, S(
@@ -2474,12 +2637,15 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
     case C_TOKEN_KIND_NUMBER:
         _text = token->t_num_lit.lit;
         break;
-    case C_TOKEN_KIND_NEW_LINE:
-        _text = S("\\n");
+    case C_TOKEN_KIND_CHAR:
+        _text = token->t_char_lit.char_str;
         break;
     case C_TOKEN_KIND_STRING:
         // ASSERT_OK(imm_print_fmt(S("\"%s\""), token->t_str_lit.str, &_text));
         _text = token->t_str_lit.str;
+        break;
+    case C_TOKEN_KIND_NEW_LINE:
+        _text = S("\\n");
         break;
     
     default:
@@ -2493,63 +2659,18 @@ c_token_dbg_fmt(C_Token *token, StringFormatter *fmt, void *text) {
             "kind: %v,\n"
             "flags: %d,\n"
             // "span: %+%v%-,\n"
+            "span: %u(%u:%u) - %u(%u:%u) [%s],\n"
             "text: %s%-"),
         fmt_obj_pref(token_kind_dbg, &token->kind),
         (int)token->flags,
+        token->span.b_byte_offset, token->span.b_line, token->span.b_col,
+        token->span.e_byte_offset, token->span.e_line, token->span.e_col,
+        token->span.file_path,
         // fmt_obj_pref(span_dbg, &token->span),
         _text
     ));
     return FMT_ERROR(OK);
 }
-
-
-/// @return total_token_count
-usize_t
-_c_token_list_flatten_at(darr_T(C_Token) tokens, C_Token *dst) {
-    auto prev = dst;
-    for_in_range(i, 0, darr_len(tokens)) {
-        auto tok = darr_get_T(C_Token, tokens, i);
-        if (tok->kind == C_TOKEN_KIND_EXPAND) {
-            dst += _c_token_list_flatten_at(tok->t_expand.tokens, dst);
-        } else if (tok->kind == C_TOKEN_KIND_INCLUDE) {
-            dst += _c_token_list_flatten_at(tok->t_include.tokens, dst);
-        } else if (tok->kind == C_TOKEN_KIND_EOF) {
-            continue;
-        } else {
-            *dst = *tok;
-            dst += 1;
-        }
-    }
-
-    return dst - prev;
-} 
-
-AllocatorError
-c_token_list_flatten_in(darr_T(C_Token) tokens, usize_t token_count_upper_bound, 
-    Allocator *alloc, darr_T(C_Token) *out_tokens) 
-{
-    darr_t flat;
-    TRY(darr_new_cap_in_T(C_Token, token_count_upper_bound, alloc, &flat));
-
-    auto len =_c_token_list_flatten_at(tokens, darr_get_unchecked_T(C_Token, flat, 0));
-    flat->len = len+1;
-    *darr_get_iT(C_Token, flat, -1) = *darr_get_iT(C_Token, tokens, -1);
-    
-    *out_tokens = flat;
-
-    return ALLOCATOR_ERROR(OK);
-}
-
-// void
-// c_trans_unit_tokenize(str_t main_file_path, C_TranslationUnitData *out_self) {
-//     LexerState state;
-//     lexer_init_default(&state);
-//     Allocator string_arena_allocator = arena_allocator(state->string_arena);
-//     WITH_FILE(file_path, "r", file, {
-//         LEXER_ALLOC_HANDLE(file_read_full_str_in(file, &string_arena_allocator, &include_text));
-//     })
-//     hashmap_set(&state->file_data_table, &file_path, &(TU_FileData) {.text = include_text});
-// }
 
 void
 dbg_print_tokens(darr_T(C_Token) tokens, str_t text, 

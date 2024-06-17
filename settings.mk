@@ -16,7 +16,8 @@ SANDBOX_DIR=sandbox
 CC= gcc
 INCS= -I. -I./lib
 # LIBS = -l:libcurl.so.4 -l:libjson-c.so.5 -l:libpackcomp.so.1
-LIBS = -l:libglfw.so.3 -l:libvulkan.so.1
+# LIBS = -l:libglfw.so.3 -l:libvulkan.so.1
+# LIBS = -l:libglfw.so.3 -l:libvulkan.so.1
 TEST_LIBS = -l:libcriterion.so.3
 # LIBS = -lcurl -ljson-c
 

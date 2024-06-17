@@ -1,0 +1,23 @@
+digraph G {
+    _1 [label="expr:\nBinOp: ="];
+    _2 [label="ident: x"];
+    _1 -> _2;
+    _3 [label="expr:\nBinOp: ||"];
+    _1 -> _3;
+    _4 [label="expr:\nBinOp: &&"];
+    _3 -> _4;
+    _5 [label="expr:\nBinOp: ="];
+    _4 -> _5;
+    _6 [label="ident: a"];
+    _5 -> _6;
+    _7 [label="ident: a1"];
+    _5 -> _7;
+    _8 [label="expr:\nBinOp: =="];
+    _4 -> _8;
+    _9 [label="ident: b"];
+    _8 -> _9;
+    _10 [label="ident: c"];
+    _8 -> _10;
+    _11 [label="ident: d"];
+    _3 -> _11;
+}

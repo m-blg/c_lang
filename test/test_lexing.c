@@ -89,7 +89,7 @@ struct_def(TestInputCase, {
 #define TINP(str, b) ((TestInputCase) {.input = str, .val = b})
 
 // Test(Suite1, decl, .exit_code=1) {
-Test(Suite1, numbers, .disabled=false) {
+Test(Suite1, numbers, .disabled=true) {
 // Test(Suite1, numbers) {
 // int main() {
 //     suite1_setup();
@@ -119,6 +119,67 @@ Test(Suite1, numbers, .disabled=false) {
         if (i == 0) {
             cr_assert_eq(darr_len(tokens), 7);
         }
+
+        // dbg_print_tokens(tokens, text);
+        // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);
+
+
+        // C_Token *tok = nullptr;
+        // ASSERT_OK(c_parse_type_specifier(&pstate, &ty));
+        // c_ast_unparse_println(type, ty, nullptr);
+
+        // c_ast_unparse_println(decl, decl, nullptr);
+        if (case_val) {
+            dbg_print_tokens(tokens, text, state.file_data_table);
+            // String s;
+            // string_new_cap_in(64, ctx_global_alloc, &s);
+            // c_ast_unparse_sprint(&s, decl, decl, nullptr);
+            // println_fmt(string_to_str(&s));
+            // // print_pref(str_t, &string_to_str(&s));
+            // string_free(&s);
+        } else {
+            // cr_log_warn("none");
+        }
+
+        if (tokens) {
+            darr_free(&tokens);
+        }
+        lexer_deinit(&state);
+    }
+
+}
+
+            
+// Test(Suite1, numbers, .disabled=false) {
+// Test(Suite1, numbers) {
+int main() {
+    suite1_setup();
+    slice_t
+    decl_test_inputs = slice_lit(
+        // TINP(S("\"%s:%%+\\n%+\"\n"), true),
+        TINP(S("\"\\\"%s:%%+\\\\n%+\\\"\\n\""), true),
+
+
+        // TINP(S("3"), true),
+        // TINP(S("148"), true),
+        // TINP(S("09"), false),
+        // TINP(S("007"), true),
+        // TINP(S("0x9"), true),
+        // TINP(S("0xaB90cFf"), true),
+        // TINP(S("0b011011"), true),
+        // TINP(S("0b102011"), false),
+    );
+
+    for_in_range(i, 0, slice_len(&decl_test_inputs)) {
+        auto test_input_case = *slice_get_T(TestInputCase, &decl_test_inputs, i);
+        str_t text = test_input_case.input;
+        bool case_val = test_input_case.val;
+
+        LexerState state;
+        lexer_init_default(&state, text, S("<file>"));
+        darr_t tokens = nullptr;
+        // cr_assert_eq(IS_OK(tokenize(&state, &tokens)), case_val);
+        ASSERT(IS_OK(tokenize(&state, &tokens)) == case_val);
 
         // dbg_print_tokens(tokens, text);
         // dbgp(c_token, darr_get_T(C_Token, tokens, 0), .data = &text);

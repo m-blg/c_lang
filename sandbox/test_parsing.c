@@ -457,7 +457,7 @@ test_expr() {
 
     // cr_log_warn("%d", g_y);
         // auto text = S("x - 3*2 - y");
-        // auto text = S("x = (a = a1) && b == c || d");
+        auto text = S("x = (a = a1) && b == c || d");
         // auto text = S("x = y = z");
         // auto text = S("x + y + z");
         // auto text = S("x + (y + z)");
@@ -470,7 +470,7 @@ test_expr() {
         // auto text = S("++x->y.z");
         // auto text = S("x ? y ? a : b : z ? a : b");
         // auto text = S("m = x ? y : z ? a : b");
-        auto text = S("m = arr[x,y]");
+        // auto text = S("m = arr[x,y]");
 
         LexerState state;
         lexer_init_default(&state, text, S("<file>"));

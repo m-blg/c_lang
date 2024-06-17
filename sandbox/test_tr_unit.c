@@ -104,11 +104,15 @@ test_graphvis() {
         auto sw = output_file_stream_stream_writer(&ofs);
         ec_translation_unit_ast_compile_graphvis(&tr_unit, &sw);
     })
+
+    system("dot -Tpng sandbox/ex_out.dot -o build/ty_out.png");
 }
 
 int
 main() {
     ctx_init_default();
-    test1();
+    // test1();
+    test3();
+    // test_graphvis();
     ctx_deinit();
 }
